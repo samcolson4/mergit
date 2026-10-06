@@ -17,9 +17,13 @@ function toast(msg, isError = false) {
 const slug = (s) =>
   s.toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "board";
 
-const me = await currentUser();
-if (!me) {
+const setup = await api("/api/setup");
+const me = setup.configured ? await currentUser() : null;
+if (!setup.configured) {
+  showSetup();
+} else if (!me) {
   $("signed-out").hidden = false;
+  $("installed-note").hidden = !new URLSearchParams(location.search).has("installed");
 } else {
   $("signed-in").hidden = false;
   $("account").hidden = false;
@@ -27,6 +31,32 @@ if (!me) {
   $("sign-out").onclick = signOut;
   for (const id of ["install-link", "install-more"]) $(id).href = me.installUrl;
   listBoards().catch((e) => $("boards").replaceChildren(el("div", { className: "empty-state", textContent: `Couldn't load boards: ${e.message}` })));
+}
+
+/**
+ * First run: create mergit's GitHub App with GitHub's own "create app from a
+ * manifest" page, then install it. The server hands us the manifest; we post it
+ * to GitHub as a form, as GitHub's flow requires.
+ */
+function showSetup() {
+  $("setup").hidden = false;
+  $("setup-token-row").hidden = !setup.needsSetupToken;
+  for (const r of document.querySelectorAll('input[name="owner"]')) {
+    r.onchange = () => ($("setup-org").disabled = r.value !== "org" || !r.checked);
+  }
+  $("setup-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const org = document.querySelector('input[name="owner"]:checked').value === "org" ? $("setup-org").value.trim() : "";
+    try {
+      const { action, manifest } = await api("/setup/start", { method: "POST", body: { org, token: $("setup-token").value.trim() } });
+      const form = el("form", { method: "post", action }, el("input", { type: "hidden", name: "manifest", value: manifest }));
+      document.body.append(form);
+      form.submit();
+    } catch (err) {
+      $("setup-error").textContent = err.message;
+      $("setup-error").hidden = false;
+    }
+  };
 }
 
 async function listBoards() {

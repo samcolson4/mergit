@@ -27,7 +27,24 @@
         </div>
       </div>
 
+      <section id="setup" class="setup" hidden>
+        <h2>Connect mergit to GitHub</h2>
+        <p>mergit saves boards as commits in your repositories, through a GitHub App you own. GitHub will show you the app it's about to create (it can read and write repository contents, nothing else), then ask which repositories it may use.</p>
+        <form id="setup-form">
+          <fieldset>
+            <legend>Create the app under</legend>
+            <label class="radio"><input type="radio" name="owner" value="me" checked> My GitHub account</label>
+            <label class="radio"><input type="radio" name="owner" value="org"> An organization:
+              <input id="setup-org" placeholder="org-name" autocomplete="off" disabled></label>
+          </fieldset>
+          <label id="setup-token-row" hidden>Setup code <input id="setup-token" autocomplete="off"></label>
+          <p id="setup-error" class="form-error" hidden></p>
+          <button class="btn primary big" type="submit">Create GitHub App</button>
+        </form>
+      </section>
+
       <section id="signed-out" hidden>
+        <p id="installed-note" class="notice" hidden>mergit is connected to GitHub. Sign in to start.</p>
         <a class="btn primary big" href="/auth/login">Sign in with GitHub</a>
         <p class="muted small">You'll see the boards in repositories you can access. Viewing needs read access; editing needs write access.</p>
       </section>
