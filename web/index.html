@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mergit</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="/logo-32.png">
+  <link rel="apple-touch-icon" href="/logo-180.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/"><img class="logo" src="/logo-180.png" alt=""> mergit</a>
+    <div class="you">Signed in as <strong id="me"></strong> · <button id="rename">change</button></div>
+  </header>
+  <main class="home">
+    <div class="home-inner">
+      <div class="hero">
+        <img src="/logo-512.png" alt="">
+        <div>
+          <h1>mergit</h1>
+          <p>Mermaid whiteboards with branches, merges and history. Edit together, live.</p>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="new-board" class="btn primary">New board</button>
+        <button id="example-board" class="btn">New example board</button>
+        <label class="btn">Import export…<input id="import" type="file" accept=".json" hidden></label>
+      </div>
+      <h3>Boards</h3>
+      <div id="boards" class="boards"><div class="empty-state">Loading…</div></div>
+    </div>
+  </main>
+  <div id="toast" class="toast" hidden></div>
+  <script type="module" src="/build/home.js"></script>
+</body>
+</html>
