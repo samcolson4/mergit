@@ -16,6 +16,11 @@ function toast(msg, isError = false) {
   toastTimer = setTimeout(() => (t.hidden = true), 4000);
 }
 
+const slug = (s) =>
+  s.toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+
+const config = await api("/api/config").catch(() => ({ github: null }));
+
 async function listBoards() {
   const { boards } = await api("/api/boards");
   $("boards").replaceChildren(
@@ -32,25 +37,80 @@ async function listBoards() {
   );
 }
 
-/** Create a board on the server, build its history locally, push it, and open it. */
-async function createBoard(defaultName, build) {
-  const name = prompt("Board name", defaultName)?.trim();
-  if (!name) return;
-  try {
-    const core = await loadCore("/pkg/mergit_core.wasm");
-    build(core);
-    const { id } = await api("/api/boards", { method: "POST", body: { name } });
-    await pushAllBranches(core, id, me.name);
-    location.href = `/b/${id}`;
-  } catch (e) {
-    toast(e.message, true);
-  }
+// ---- create dialog --------------------------------------------------------------
+
+const dialog = $("create");
+let pending = null; // { build(core) } for the board being created
+let pathEdited = false;
+
+function storage() {
+  return dialog.querySelector('input[name="storage"]:checked').value;
 }
 
-$("new-board").onclick = () =>
-  createBoard("Untitled board", (core) => core.call("init", { board: STARTER, author: me.name, time: Date.now() }));
+function syncStorage() {
+  $("github-fields").hidden = storage() !== "github";
+  for (const id of ["gh-repo", "gh-path"]) $(id).required = storage() === "github";
+}
 
-$("example-board").onclick = () => createBoard("Checkout system", (core) => seedRepo(core, me.name));
+function openCreate(title, defaultName, build) {
+  pending = { build };
+  pathEdited = false;
+  $("create-title").textContent = title;
+  $("board-name-input").value = defaultName;
+  $("create-error").hidden = true;
+  $("storage").hidden = !config.github;
+  dialog.querySelector(`input[value="${config.github ? "github" : "local"}"]`).checked = true;
+  if (config.github) {
+    $("gh-repo").value ||= config.github.repo;
+    $("gh-branch").value ||= config.github.branch;
+    $("gh-path").value = `${config.github.dir ? `${config.github.dir}/` : ""}${slug(defaultName)}`;
+  }
+  syncStorage();
+  dialog.showModal();
+  $("board-name-input").select();
+}
+
+$("board-name-input").addEventListener("input", () => {
+  if (config.github && !pathEdited) {
+    $("gh-path").value = `${config.github.dir ? `${config.github.dir}/` : ""}${slug($("board-name-input").value)}`;
+  }
+});
+$("gh-path").addEventListener("input", () => (pathEdited = true));
+dialog.querySelectorAll('input[name="storage"]').forEach((r) => r.addEventListener("change", syncStorage));
+$("create-cancel").onclick = () => dialog.close();
+
+$("create-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const submit = $("create-submit");
+  const github =
+    storage() === "github"
+      ? { repo: $("gh-repo").value.trim(), path: $("gh-path").value.trim(), branch: $("gh-branch").value.trim() }
+      : null;
+  submit.disabled = true;
+  submit.textContent = github ? "Connecting to GitHub…" : "Creating…";
+  $("create-error").hidden = true;
+  try {
+    const { id, imported } = await api("/api/boards", { method: "POST", body: { name: $("board-name-input").value, github } });
+    if (!imported) {
+      // A new board: build its first history here, then push it (to GitHub, if chosen).
+      submit.textContent = github ? "Writing to GitHub…" : "Saving…";
+      const core = await loadCore("/pkg/mergit_core.wasm");
+      pending.build(core);
+      await pushAllBranches(core, id, me.name);
+    }
+    location.href = `/b/${id}`;
+  } catch (err) {
+    $("create-error").textContent = err.message;
+    $("create-error").hidden = false;
+    submit.disabled = false;
+    submit.textContent = "Create";
+  }
+});
+
+$("new-board").onclick = () =>
+  openCreate("New board", "Untitled board", (core) => core.call("init", { board: STARTER, author: me.name, time: Date.now() }));
+
+$("example-board").onclick = () => openCreate("New example board", "Checkout system", (core) => seedRepo(core, me.name));
 
 $("import").onchange = async (e) => {
   const file = e.target.files[0];
@@ -58,12 +118,12 @@ $("import").onchange = async (e) => {
   if (!file) return;
   const data = JSON.parse(await file.text().catch(() => "{}"));
   if (!data.repo) return toast("That doesn't look like a mergit export", true);
-  createBoard(file.name.replace(/\.(mergit|gitmer)\.json$|\.json$/, ""), (core) => core.call("import", { repo: data.repo }));
+  const name = file.name.replace(/\.(mergit|gitmer)\.json$|\.json$/, "");
+  openCreate("Import board", name, (core) => core.call("import", { repo: data.repo }));
 };
 
 $("rename").onclick = () => {
-  const name = rename();
-  if (name) {
+  if (rename()) {
     me = identity();
     $("me").textContent = me.name;
   }

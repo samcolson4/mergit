@@ -31,6 +31,29 @@
       <div id="boards" class="boards"><div class="empty-state">Loading…</div></div>
     </div>
   </main>
+  <dialog id="create" class="dialog">
+    <form method="dialog" id="create-form">
+      <h2 id="create-title">New board</h2>
+      <label>Name <input id="board-name-input" required maxlength="80" autocomplete="off"></label>
+      <fieldset id="storage">
+        <legend>History is stored in</legend>
+        <label class="radio"><input type="radio" name="storage" value="github" checked> GitHub</label>
+        <label class="radio"><input type="radio" name="storage" value="local"> This server only</label>
+      </fieldset>
+      <div id="github-fields">
+        <label>Repository <input id="gh-repo" placeholder="owner/repo" autocomplete="off"></label>
+        <label>Folder <input id="gh-path" placeholder="diagrams/my-board" autocomplete="off"></label>
+        <label>Branch <input id="gh-branch" placeholder="repository default" autocomplete="off"></label>
+        <p class="muted small">Each commit becomes a git commit in that folder. If the folder already holds a mergit board, its history is imported.</p>
+      </div>
+      <p id="create-error" class="form-error" hidden></p>
+      <div class="row end">
+        <button type="button" id="create-cancel" class="btn ghost">Cancel</button>
+        <button type="submit" id="create-submit" class="btn primary">Create</button>
+      </div>
+    </form>
+  </dialog>
+
   <div id="toast" class="toast" hidden></div>
   <script type="module" src="/build/home.js"></script>
 </body>

@@ -290,3 +290,28 @@ h3 { margin: 6px 0 2px; font-size: 11px; text-transform: uppercase; letter-spaci
 .empty-state { color: var(--muted); padding: 24px 0; }
 .you { margin-left: auto; color: var(--muted); font-size: 12px; }
 .you button { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; }
+
+/* ---- dialogs ------------------------------------------------------------------ */
+.dialog {
+  border: 1px solid var(--line); border-radius: 14px; padding: 0; width: min(440px, calc(100vw - 32px));
+  background: var(--panel); color: var(--ink); box-shadow: var(--shadow);
+}
+.dialog::backdrop { background: rgb(0 0 0 / 35%); }
+.dialog form { display: flex; flex-direction: column; gap: 12px; padding: 20px; }
+.dialog h2 { margin: 0 0 4px; font-size: 17px; }
+.dialog label { display: flex; flex-direction: column; gap: 4px; font-weight: 550; }
+.dialog input:not([type="radio"]) {
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; background: var(--panel-2); font-weight: 400;
+}
+.dialog input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.dialog fieldset { border: 0; padding: 0; margin: 0; display: flex; gap: 16px; flex-wrap: wrap; }
+.dialog legend { font-weight: 550; margin-bottom: 6px; padding: 0; }
+.dialog label.radio { flex-direction: row; align-items: center; gap: 6px; font-weight: 400; }
+#github-fields { display: flex; flex-direction: column; gap: 12px; }
+.small { font-size: 12px; margin: 0; }
+.form-error { color: var(--del); background: var(--del-soft); border-radius: 8px; padding: 8px 10px; margin: 0; }
+.row.end { justify-content: flex-end; }
+.commit .gh { color: var(--muted); text-decoration: none; font-size: 11px; margin-left: 4px; }
+.commit .gh:hover { color: var(--accent); }
+
+a.btn { text-decoration: none; color: inherit; }
