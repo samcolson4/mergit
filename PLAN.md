@@ -166,17 +166,32 @@ nothing is ever lost without polluting the real history.
 * **Auth & sharing:** per-board ACLs, read-only share links, and branch protection
   ("`main` requires review").
 
-## 8. Storage & GitHub (built)
+## 8. Storage, identity & GitHub (built)
 
-**Decision: GitHub is the source of truth for committed history.** A commit is
-accepted only once it has been written to GitHub as a real git commit. The Board
-Durable Object keeps the live, uncommitted working copy of each branch (a per-keystroke
-CRDT log, which git is the wrong tool for), plus a cache of objects and refs that can be
-rebuilt from GitHub. Boards can still opt out ("this server only") for local
-development or throwaway work.
+**Decisions:**
 
-The trade-offs we accepted: a commit takes a second or two (4–6 GitHub API calls), and
-commits pause if GitHub is down or rate-limited. Editing never pauses.
+1. **Git is the only store for committed history.** A commit is accepted only once
+   it's in the repository. The Board Durable Object keeps the live, uncommitted working
+   copy (a per-keystroke CRDT log, which git is the wrong tool for) plus a cache that can
+   be rebuilt from git. There are no server-only boards.
+2. **A GitHub App does all writes,** with installation tokens: short-lived, scoped to the
+   repos the app is installed on, server-side only. No personal access tokens.
+3. **Sign in with GitHub** (the App's user authorization) identifies people, and **access
+   follows repository permission:** write → edit, read → view, none → no access.
+4. **Identity is separable from storage.** Because the app (not the person) writes to
+   git, people *without* GitHub accounts can be added later (email or Google sign-in,
+   workspace invites) without changing storage. That's the path for non-technical
+   users: they never need to know about repos, and boards default to `boards/<name>`
+   with the folder picker tucked behind "Change…".
+
+**Why not keep the server as the source of truth?** It's simpler for non-technical
+users, but it gives up mergit's distinctive property: diagrams live in *your* repo, next
+to your code, reviewable in PRs, and survive mergit itself. Decision 4 gets most of the
+simplicity back.
+
+The trade-offs accepted: commits take a second or two and pause if GitHub is down
+(editing never pauses); each install has a rate limit (5,000+ requests an hour); other
+git hosts (GitLab, Bitbucket) would each need an adapter for `github.js`/`app-auth.js`.
 
 ### Layout: a repo + folder per board
 
@@ -187,7 +202,8 @@ commits pause if GitHub is down or rate-limited. Editing never pauses.
   README.md                   generated: diagrams GitHub renders, plus the commit hash
 ```
 
-* Each board chooses `{ repo, folder, branch }` at creation, with server-wide defaults.
+* Each board picks a repo from those the app is installed on (and you can write to), and
+  a folder via a browser: new folders, or an existing mergit board folder to import it.
   Living next to the code it documents is the main use case. A shared `diagrams` repo
   works too. Repo-per-board isn't the default (repo sprawl, permissions), but it's just
   a choice of repo.
@@ -205,7 +221,8 @@ commits pause if GitHub is down or rate-limited. Editing never pauses.
 
 * Import outside edits (PRs that touch `.mmd` files) as mergit commits, three-way
   merged into the live working copy; a push webhook makes it immediate.
-* A GitHub App instead of a single personal access token.
+* `installation` webhooks, so uninstalls and repo removals take effect immediately.
+* Email or Google sign-in plus workspace invites, for people without GitHub accounts.
 * Connecting an existing server-only board to GitHub (write out its history).
 * *Maybe later:* speak the git protocol directly (`git clone https://…/b/<id>`).
 
@@ -233,7 +250,8 @@ commits pause if GitHub is down or rate-limited. Editing never pauses.
 | **3. Visual editing** (6–8 wks) | Click/drag editing compiled to text patches; cross-frame links; ELK layout; templates gallery; Tauri desktop app; git export/import + CLI | Non-technical users can edit without touching code |
 | **4a. Collaboration core** ✅ | Cloudflare Worker + Durable Object per board; object sync (have/want) with compare-and-swap refs; live Yjs working copy per branch; presence (avatars, cursors, selections); shared merge state; board directory and share links | Two browsers co-edit, commit, branch and merge against `wrangler dev` |
 | **4b. GitHub storage** ✅ | GitHub as source of truth (§8): commits written as git commits in a chosen repo folder, branch mapping, outside-edit detection, rebuild from git; fake GitHub for local dev | History survives losing the Durable Object; rebuilt hashes match |
-| **4c. Collaboration, production** (4–6 wks) | Accounts and auth (Cloudflare Access to start); per-board ACLs and read-only links; GitHub App; import outside edits; comments pinned to nodes; review flow ("propose changes" → merge); rate limits and size caps | A team of 5 uses it for an architecture review end to end |
+| **4c. Accounts & GitHub App** ✅ | Sign in with GitHub; GitHub App installation tokens for all writes; access from repo permissions (edit / view / none); repo + folder pickers; enforced commit authorship; CSP, origin checks, body limits | Viewer, outsider, forged-author and cross-site cases refused against the fake GitHub |
+| **4d. Collaboration, production** (4–6 wks) | Test on real GitHub; installation webhooks; non-GitHub sign-in + invites; import outside edits; read-only share links; comments pinned to nodes; review flow ("propose changes" → merge); rate limits and size caps | A team of 5 uses it for an architecture review end to end |
 
 ## 11. Risks & open questions
 
@@ -275,7 +293,6 @@ web/       Static assets: HTML, CSS, logo; build output (pkg/, build/, vendor/) 
   on the server prevents the classic CRDT double-seed bug.
 * **Hibernatable WebSockets**, so idle boards cost nothing. State is rebuilt from SQLite
   on wake.
-* **Known gaps:** no auth (anyone with the URL can edit, and the board list is public);
-  no undo yet; a client offline for a long time pushes its whole document on reconnect
-  (correct, but chatty); presence is broadcast to the whole board on every cursor move
-  (fine for small teams).
+* **Known gaps:** no undo yet; a client offline for a long time pushes its whole document
+  on reconnect (correct, but chatty); presence is broadcast to the whole board on every
+  cursor move (fine for small teams). Access control is covered in §8.

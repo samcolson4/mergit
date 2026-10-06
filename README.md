@@ -2,23 +2,26 @@
 
 # mergit
 
-Live, shared Mermaid whiteboards with git-style version control.
+Live, shared Mermaid whiteboards whose history lives in your GitHub repositories.
 
 Every diagram on the infinite canvas is Mermaid text. People on the same branch edit
 together in real time (cursors, selections, live typing), then **commit**, **branch**,
 **merge** and browse **history**, with diffs that say *"added node Refunded"* rather
-than *"+3 −1 lines"*.
+than *"+3 −1 lines"*. Every commit is a real git commit in a folder of a repo you choose.
 
-- **Rust → WebAssembly core**: content-addressed object store, branches, three-way
-  merge, line and semantic diffs. One crate, run in every browser.
-- **Cloudflare backend**: one Worker plus one Durable Object per board. No database to
-  run, no servers to manage.
-- **GitHub as the source of truth**: every commit is a real git commit in a folder of a
-  repository you choose (`board.json` + one `.mmd` file per diagram), and a board's
-  whole history can be rebuilt from GitHub alone.
-- **Yjs** for real-time co-editing of each branch's uncommitted state.
+- **Sign in with GitHub.** You see the boards in repositories you can access: write
+  access means you can edit, read access means you can view.
+- **Git is the source of truth.** A commit only counts once it's in the repo
+  (`board.json` plus one `.mmd` file per diagram), and a board's whole history can be
+  rebuilt from git.
+- **A GitHub App does the writing,** with short-lived, repo-scoped tokens that stay on
+  the server. Nobody handles tokens. The person is the commit's author; the app is the
+  committer.
+- **Rust → WebAssembly core** (content-addressed objects, branches, three-way merge,
+  semantic diffs) runs in every browser.
+- **Cloudflare** hosts it all: one Worker, a Durable Object per board, nothing else to run.
 
-See [PLAN.md](PLAN.md) for the full design rationale and roadmap.
+See [PLAN.md](PLAN.md) for design rationale and the roadmap.
 
 ---
 
@@ -29,6 +32,7 @@ See [PLAN.md](PLAN.md) for the full design rationale and roadmap.
 - [How it works](#how-it-works)
 - [GitHub storage](#github-storage)
 - [Hosting on Cloudflare](#hosting-on-cloudflare)
+- [Security](#security)
 - [Project layout](#project-layout)
 - [Production readiness](#production-readiness)
 
@@ -44,41 +48,46 @@ See [PLAN.md](PLAN.md) for the full design rationale and roadmap.
 
 ```bash
 npm install
-npm run dev        # build the core + client, then run `wrangler dev` on http://localhost:8787
-npm test           # Rust core tests + JS tests (object encoding vs the Rust core)
+npm run dev:fake-github   # everything, against a local fake GitHub: http://localhost:8787
+npm test                  # Rust core tests + JS tests
 ```
 
-`wrangler dev` runs the real Workers runtime (`workerd`) locally, including Durable
-Objects and their SQLite storage. Local data lives in `.wrangler/`; delete that folder
-to start fresh. Edits under `client/` rebuild automatically. After changing `core/`,
-run `npm run build:wasm` and reload.
+`dev:fake-github` needs no GitHub App or repository. It runs
+[`scripts/fake-github.mjs`](scripts/fake-github.mjs), an in-memory stand-in for the
+parts of the GitHub API mergit uses (sign-in, app installations, git data), with real
+JWT signature checks.
 
-**To develop with GitHub storage but without a real repository**, run
-`npm run dev:fake-github`. It starts [`scripts/fake-github.mjs`](scripts/fake-github.mjs),
-an in-memory stand-in for the GitHub API, and points the Worker at it. See what was
-written with `curl http://127.0.0.1:8788/_log/acme/diagrams/main`. To use real GitHub
-locally, copy [`.dev.vars.example`](.dev.vars.example) to `.dev.vars` and fill in a token.
+- **Signing in:** "Sign in with GitHub" shows a fake authorize page where you type any
+  username. `viewer` gets read-only access and `outsider` gets none.
+- **Repositories:** the fake app is installed on `acme/diagrams` and `acme/platform`.
+- **Seeing what was written:** `curl http://127.0.0.1:8788/_log/acme/diagrams/main`.
 
-**To try collaboration on one machine**, open the same board at `localhost:8787` in one
-tab and `127.0.0.1:8787` in another. They're different origins, so each keeps its own
-display name.
+To run against **real GitHub** locally, [register a GitHub App](#1-register-the-github-app)
+(add `http://localhost:8787/auth/callback` as a callback URL), copy
+[`.dev.vars.example`](.dev.vars.example) to `.dev.vars`, fill it in, and run `npm run dev`.
+
+`wrangler dev` runs the real Workers runtime locally, Durable Objects and SQLite
+included; data lives in `.wrangler/` (delete it to start fresh). Edits under `client/`
+and `worker/` reload automatically. After changing `core/`, run `npm run build:wasm`.
+
+**To try collaboration on one machine**, use `localhost:8787` in one tab and
+`127.0.0.1:8787` in another. They're separate origins, so you can sign in as two
+different people.
 
 ## Using mergit
 
 | | |
 |---|---|
-| **Boards** | The home page lists boards. Creating one asks where its history lives: a GitHub repo, folder and branch, or "this server only". Pointing at a folder that already holds a mergit board imports its history. *New example board* includes history and a `feature/express-pay` branch to merge. *Import export…* turns a `.mergit.json` export into a new board. |
-| **Canvas** | Drag empty space to pan; ⌘/Ctrl + scroll (or pinch) to zoom; `F` fits everything. Double-click empty space to add a flowchart, or use **+ Diagram** for other templates. |
-| **Editing** | Double-click a diagram (or select it and press `Enter`) to edit its Mermaid source; it re-renders as you type. Drag the header to move it, drag the bottom-right corner to resize, and press `⌫` to delete. |
-| **Sharing** | **Share** copies the board URL. Everyone on the same branch edits the same live copy and sees each other's avatars, cursors and selections. |
-| **Commit** | Snapshots the branch's current state for everyone (⌘↵ in the message box). Changed diagrams are outlined, and the panel shows a semantic diff (for flowcharts) plus a line diff. |
+| **Signing in** | "Sign in with GitHub". The home page lists boards in repositories you can access, marked *view only* where you have read access. |
+| **New board** | Give it a name. It's saved to `boards/<name>/` in a repository the mergit app is installed on. **Change…** opens a folder browser: navigate the repo, create a new folder, or pick a folder that already holds a mergit board to import its history. If your repo isn't listed, **Add a repository** opens GitHub to install the app there. |
+| **Canvas** | Drag empty space to pan; ⌘/Ctrl + scroll (or pinch) to zoom; `F` fits everything. Double-click empty space for a flowchart, or use **+ Diagram** for other templates. |
+| **Editing** | Double-click a diagram (or select it and press `Enter`) to edit its Mermaid source; it re-renders as you type. Drag the header to move it, the bottom-right corner to resize, and press `⌫` to delete. |
+| **Sharing** | **Share** copies the board URL. Anyone with access to the repository can open it. Everyone on a branch edits the same live copy, with avatars, cursors and selections. |
+| **Commit** | Saves the branch's current state, for everyone, as a git commit (⌘↵ in the message box; it takes a second or two). Changed diagrams are outlined, and the panel shows a semantic diff (for flowcharts) plus a line diff. |
 | **Branches** | **New** creates a branch from the current commit, optionally taking the uncommitted changes with it. Switching branches never discards anything: uncommitted work stays on its branch. |
 | **Merge** | **Merge…** brings another branch into this one. Clean merges commit automatically. Conflicts are written as `%%` Mermaid comments, so the diagram still renders. Anyone on the branch can resolve them and commit to finish. |
-| **History** | Click a commit to view the board as it was, with what that commit changed. *Restore this version* brings it back as uncommitted changes; *Branch from here* starts a branch at that point. |
-| **Export** | Downloads the board's entire history as one JSON file. |
-
-Your display name is asked for once and stored in the browser. It appears on your
-avatar and on your commits.
+| **History** | Click a commit to view the board as it was, with what that commit changed, and **GitHub ↗** to see the git commit. *Restore this version* brings it back as uncommitted changes; *Branch from here* starts a branch at that point. |
+| **Export** | Downloads the board's history as one JSON file (*Import export…* on the home page turns one into a new board). |
 
 ## How it works
 
@@ -90,18 +99,19 @@ flowchart LR
     UI <--> YD[Yjs doc<br/>live working copy]
   end
   subgraph Cloudflare
-    W[Worker<br/>router + static assets] --> Dir[Directory DO<br/>board list]
-    W --> B[Board DO, one per board<br/>SQLite: objects, refs,<br/>live doc log]
+    W[Worker<br/>routing, sign-in gate,<br/>security headers] --> Dir[Directory DO<br/>accounts, sessions,<br/>repo access, board list]
+    W --> B[Board DO, one per board<br/>live docs + cache]
   end
   Core -->|pack + compare-and-swap ref| W
   YD <-->|WebSocket: Yjs updates + presence| B
-  B -->|git commits, before a ref moves| GH[(GitHub repo<br/>folder per board)]
+  B -->|git commits via the App,<br/>before a ref moves| GH[(GitHub repo<br/>folder per board)]
+  Dir -->|who you are,<br/>which repos you can access| GH
 ```
 
 ### Two layers of state
 
 1. **History: commits and branches.** These are immutable, content-addressed objects,
-   modelled on git:
+   modelled on git, and stored in GitHub (see [GitHub storage](#github-storage)):
 
    | Object | Contents | Address |
    |---|---|---|
@@ -117,10 +127,28 @@ flowchart LR
    Mermaid source is a `Y.Text`, so two people typing in the same diagram merge
    character by character. A shared `meta` map holds in-progress merge state, so one
    person can start a merge and another can finish it. The schema lives in
-   [`client/doc.js`](client/doc.js) and is shared by browser and server.
+   [`client/doc.js`](client/doc.js) and is shared by browser and server. This state
+   changes on every keystroke, so it lives in the board's Durable Object, not in git.
 
-   "Uncommitted changes" means the difference between this document and the branch's
-   head commit. It's computed in each browser by the core.
+### Identity and access
+
+- **Sign-in** uses the GitHub App's user authorization (OAuth). The callback stores the
+  person's GitHub user token in the Directory Durable Object and sets an opaque,
+  random `HttpOnly` session cookie (`SameSite=Lax`, 30 days). Tokens are refreshed
+  automatically.
+- **Repo access** comes from GitHub: the repos the app is installed on that the person
+  can access, with their permission level. It's cached for 5 minutes, and re-checked
+  sooner when it's missing.
+- **Every board request** passes through the Worker, which asks the Directory "who is
+  this, and what may they do on this board's repo?". It forwards the answer to the
+  board as headers it sets itself; the client can't supply them.
+  - *write → edit:* live editing, committing, branching, merging.
+  - *read → view:* everything visible; live edits and pushes are refused server-side.
+  - *none:* 403.
+- **Commit authorship is enforced.** The server refuses commits whose author isn't the
+  signed-in person (except the imported history in a board's very first push). In
+  git, the person is the author, with their GitHub noreply address, and the app is
+  the committer.
 
 ### Who does what
 
@@ -128,39 +156,35 @@ flowchart LR
   ([`core/`](core/src)) commits, diffs, three-way merges and builds history. It's
   compiled to a ~330 KB `.wasm` file with no imports, called through a tiny JSON ABI
   ([`client/core.js`](client/core.js)).
-- **The Board Durable Object stores and relays; it never merges.** For GitHub-backed
-  boards it also writes each commit to GitHub *before* accepting it (see
-  [GitHub storage](#github-storage)); its own tables are then a cache. Per board, it:
-  - stores objects exactly as the core serialised them, after checking each one's
-    SHA-256;
-  - updates refs **only by compare-and-swap** (`old` must match the current value);
-  - relays Yjs updates between everyone on a branch, and persists them as an
-    append-only log, compacted into a snapshot every 200 updates;
+- **The Board Durable Object stores, relays and writes to GitHub; it never merges.** Per board, it:
+  - checks every pushed object's SHA-256 and shape, and that a commit's whole history
+    is present;
+  - updates refs **only by compare-and-swap**, after writing the commits to GitHub.
+    Ref updates are queued, so the check and the write happen as one step;
+  - relays Yjs updates between editors on a branch, and persists them as an
+    append-only log, compacted every 200 updates;
   - **seeds** a branch's live document from its head commit the first time it's
-    opened. Seeding only happens on the server, so two clients can never both seed
-    a document and duplicate its contents;
-  - tracks presence (name, colour, branch, selection, cursor) and broadcasts it;
-  - uses **hibernatable WebSockets**, so idle boards cost nothing, and rebuilds its
-    in-memory documents from SQLite when it wakes.
-- **The Directory Durable Object** is a single instance that lists boards and creates
-  new ones.
+    opened. Seeding only happens on the server, so two clients can never both seed a
+    document and duplicate its contents;
+  - tracks presence (from the session, so names can't be faked) and uses
+    **hibernatable WebSockets**, so idle boards cost nothing;
+  - caches objects, refs and the mergit-to-git commit mapping. All of it can be rebuilt
+    from GitHub.
+- **The Directory Durable Object** holds accounts, sessions, cached repo access and the
+  board list.
 
 ### Committing, step by step
 
 1. The browser's core turns the live document into a commit (new blobs, tree, commit).
-2. It **packs** the objects the server doesn't have yet (everything reachable from
-   the new commit, minus what's reachable from known server branches).
-3. `POST /refs { name, old, new, objects }`. The server verifies the hashes and object
-   shapes, stores the objects, and moves the branch **only if it still points at `old`**.
-   For GitHub-backed boards, the commit is written to GitHub first. If GitHub refuses,
-   the branch doesn't move and you see why. Ref updates for a board are queued, so this
-   check-then-write is atomic.
-4. On success, the server broadcasts `{type: "ref"}`. Every client fetches the new
-   objects and updates its view. The live document already matches the commit, so
-   everyone on the branch goes "clean".
-5. On `409`, someone else committed first. The browser discards its local commit,
-   fetches theirs, and asks you to review and commit again. History never forks by
-   accident.
+2. It **packs** the objects the server doesn't have yet.
+3. `POST /refs { name, old, new, objects }`. The server checks your role, authorship,
+   hashes and shapes; writes the commit to GitHub; and moves the branch **only if it
+   still points at `old`**. If GitHub refuses, nothing moves and you see why.
+4. On success, the server broadcasts `{type: "ref"}`, and every client fetches the new
+   objects. The live document already matches the commit, so everyone on the branch
+   goes "clean".
+5. On `409`, someone else committed first. Your browser discards its local commit,
+   fetches theirs, and asks you to review and commit again.
 
 Merges follow the same path. A clean merge pushes a two-parent commit. A conflicted
 merge writes the result, with markers, into the live document and records the merge
@@ -168,21 +192,24 @@ in the shared `meta`, and whoever commits next creates the merge commit.
 
 ### HTTP & WebSocket API
 
-All board routes are handled by that board's Durable Object.
-
 | Method & path | Purpose |
 |---|---|
-| `GET /api/boards` | List boards |
-| `POST /api/boards` `{name, github?: {repo, path, branch}}` | Create a board → `{id, imported}`. `imported` > 0 means its history was rebuilt from GitHub. |
-| `GET /api/boards/:id` | Board name + all refs |
+| `GET /auth/login?next=` → GitHub → `GET /auth/callback` | Sign in |
+| `POST /auth/logout` | Sign out |
+| `GET /api/me` | The signed-in person, plus the app's install URL |
+| `GET /api/repos[?refresh]` | Repos the app can reach that you can access, with your permission |
+| `GET /api/folders?repo=&path=` | Sub-folders of `path` (for the folder picker), and whether it holds a board |
+| `GET /api/boards` | Boards in repos you can access, with your role |
+| `POST /api/boards` `{name, repo, path}` | Create a board → `{id, imported}`. `imported` > 0 means its history was rebuilt from git. `409 {boardId}` if the folder already has a board. |
+| `GET /api/boards/:id` | Name, refs, GitHub location, your role |
 | `POST /api/boards/:id/pack` `{want, have}` | Objects reachable from `want`, not walking past commits in `have` |
-| `POST /api/boards/:id/refs` `{name, old, new, objects, by}` | Upload objects and compare-and-swap a branch (`new: null` deletes it). `409 {current}` if it moved. |
-| `GET /api/boards/:id/ws?branch=&name=&color=` | WebSocket for a branch's live document |
-| `GET /api/boards/:id/github/commit/:hash` | Redirect to the git commit a mergit commit was written as |
-| `GET /api/config` | Server defaults for new boards (GitHub repo, branch, folder) |
+| `POST /api/boards/:id/refs` `{name, old, new, objects}` | Push commits and compare-and-swap a branch (`new: null` deletes it). Editors only. |
+| `GET /api/boards/:id/ws?branch=` | WebSocket for a branch's live document |
+| `GET /api/boards/:id/github/commit/:hash` | Redirect to the git commit for a mergit commit |
 
-WebSocket frames: **binary** frames are Yjs updates (both directions). **Text** frames are
-JSON: server → client `hello`, `synced`, `peers`, `ref`; client → server `presence`.
+Every write must come from our own pages: matching `Origin` and a JSON body.
+WebSocket frames: **binary** frames are Yjs updates; **text** frames are JSON (server →
+client `hello`, `synced`, `peers`, `ref`; client → server `presence`).
 
 ### Merging and diffing
 
@@ -191,12 +218,12 @@ JSON: server → client `hello`, `synced`, `peers`, `ref`; client → server `pr
   side with an edit on the other is a conflict, and the edited version is kept.
 - **Conflict markers are Mermaid comments** (`%% <<<<<<< main` …), so a conflicted
   diagram still renders, showing both sides.
-- **Semantic diff** parses flowcharts into nodes and edges and reports what was
-  added, removed or relabelled. Other diagram types fall back to line diffs.
+- **Semantic diff** parses flowcharts into nodes and edges and reports what was added,
+  removed or relabelled. Other diagram types fall back to line diffs.
 
 ## GitHub storage
 
-A GitHub-backed board lives in a folder of a repository, on a branch:
+Each board lives in one folder of one repository, on the repo's default branch:
 
 ```
 acme/platform @ main
@@ -209,10 +236,7 @@ acme/platform @ main
 ```
 
 - **Every mergit commit is one git commit** that replaces just that folder, written
-  through the GitHub Git Data API (about 4–6 API calls; commits take a second or two).
-  It's made **with the committing person's own token**, so on GitHub it's committed by
-  them, and the author is their mergit name with their GitHub noreply address
-  (linked to their profile). Trailers in the message carry what git can't hold:
+  through the Git Data API (4–6 calls). Trailers carry what git can't hold:
 
   ```
   Add express pay path
@@ -223,98 +247,103 @@ acme/platform @ main
   Mergit-Author: Sam
   ```
 
-- **Branches:** mergit `main` maps to the board's git branch. Every other mergit branch
-  maps to `mergit/<folder-slug>/<name>`, e.g. `mergit/docs-diagrams-checkout-system/feature/x`.
+- **Branches:** mergit `main` maps to the repo's default branch. Every other mergit
+  branch maps to `mergit/<folder-slug>/<name>`.
 - **The rest of the repo is untouched.** Code and other commits can land on the same
-  branch. mergit builds on top of them, so the git branch only ever fast-forwards.
-- **Edits to the folder made outside mergit are refused, not overwritten.** If someone
-  changes the folder directly on GitHub, the next commit fails with an explanation
-  and nothing moves. Reverting the outside change makes commits work again. Importing
-  outside edits as mergit commits is on the roadmap.
-- **Recovery:** create a board pointing at the same repo and folder, and mergit rebuilds
-  the whole history from git: every branch, every commit. Each rebuilt commit's hash
-  is checked against its `Mergit-Commit` trailer
-  ([`worker/git-store.js`](worker/git-store.js), `rebuild`). The JavaScript object
-  encoding is tested byte-for-byte against the Rust core
-  ([`test/canonical.test.mjs`](test/canonical.test.mjs)).
-- **What stays in the Durable Object:** the live, uncommitted working copy of each branch
-  (it changes on every keystroke, which suits a CRDT log, not git), plus a cache of
-  objects and refs, and the mergit-to-git commit mapping.
-
-### Connecting GitHub (per person)
-
-Each person adds **their own** GitHub token in the app: **Connect GitHub** in the top
-bar, or automatically the first time they commit to a GitHub-backed board.
-
-- It's checked against GitHub (`/api/github/user`), then kept **in that browser only**
-  (`localStorage`).
-- It's sent as an `x-github-token` header only with our own API's write requests
-  (commits, branches, creating or importing boards). The Worker uses it for that one
-  request and **never stores it**.
-- Viewing and live editing never need a token; only writing history does.
-- Access follows each person's own repository permissions.
-
-To create one: GitHub → Settings → Developer settings →
-[Fine-grained tokens](https://github.com/settings/personal-access-tokens/new). Choose the
-repositories boards live in, and grant **Contents: Read and write**. Organisations may
-need to approve fine-grained tokens. With `npm run dev:fake-github`, any token works
-and becomes your fake username.
-
-Use one board per folder. Two boards writing to the same folder will refuse each other's
-commits as "outside edits".
+  branch. mergit builds on top of them, so git branches only fast-forward.
+- **Folders mergit didn't create are never overwritten.** A board can only go in a new
+  folder, or one that already holds a mergit board (which imports its history). If
+  someone edits a board's folder directly on GitHub, the next commit is refused with
+  an explanation, and reverting the outside edit unblocks it. Importing outside edits
+  is on the roadmap.
+- **Recovery:** create a board on the same folder and mergit rebuilds its whole history
+  from git, checking every commit's hash against its `Mergit-Commit` trailer
+  ([`worker/git-store.js`](worker/git-store.js)). The JS object encoding is tested
+  byte-for-byte against the Rust core ([`test/canonical.test.mjs`](test/canonical.test.mjs)).
+- **One board per folder** is enforced.
 
 ## Hosting on Cloudflare
 
-mergit is a single Worker with static assets and two Durable Object classes, so it runs
+mergit is a single Worker with static assets and two Durable Object classes. It runs
 on the Workers **Free** plan (SQLite-backed Durable Objects are included) or Paid plan.
 
+### 1. Register the GitHub App
+
+GitHub → Settings → Developer settings → **GitHub Apps → New GitHub App** (or under an
+organisation's settings, to own it there):
+
+| Setting | Value |
+|---|---|
+| GitHub App name | anything unique, e.g. `acme-mergit`; its URL slug is `GITHUB_APP_SLUG` |
+| Homepage URL | your mergit URL |
+| Callback URL | `https://<your-host>/auth/callback` (add `http://localhost:8787/auth/callback` too, for local dev) |
+| Expire user authorization tokens | ✅ (mergit refreshes them) |
+| Request user authorization (OAuth) during installation | optional |
+| Webhook | uncheck **Active** (not used yet) |
+| Repository permissions | **Contents: Read and write** (Metadata: Read is added automatically) |
+| Where can this GitHub App be installed? | *Only on this account*, or *Any account* for other orgs |
+
+After creating it, note the **App ID** and **Client ID**, **generate a client secret**,
+and **generate a private key** (a `.pem` download). Then **Install App** on the
+account or org, choosing the repositories boards may live in. People see only those
+repos, and only the ones they can access themselves.
+
+### 2. Configure and deploy
+
 ```bash
-npx wrangler login     # once
-npm run deploy         # builds core + client, then `wrangler deploy`
+npx wrangler login
+npx wrangler secret put GITHUB_CLIENT_SECRET
+npx wrangler secret put GITHUB_APP_PRIVATE_KEY < path/to/app.private-key.pem
 ```
 
-The first deploy creates the `mergit` Worker, applies the Durable Object migration
-(`v1`, SQLite-backed `Board` and `Directory`), uploads `web/` as static assets, and
-prints a `*.workers.dev` URL.
+Set the public settings in `wrangler.jsonc` → `vars`: `GITHUB_APP_ID`,
+`GITHUB_APP_SLUG`, `GITHUB_CLIENT_ID`. Then:
 
-**GitHub needs no server setup.** People add their own tokens in the UI (see
-[Connecting GitHub](#connecting-github-per-person)). Optionally:
+```bash
+npm run deploy           # builds core + client, then `wrangler deploy`
+```
 
-- Set defaults offered when creating boards, in `wrangler.jsonc` → `vars`:
-  `GITHUB_DEFAULT_REPO` (`owner/repo`), `GITHUB_DEFAULT_BRANCH` (empty = the repo's
-  default branch), `GITHUB_DEFAULT_DIR` (default `diagrams`).
-- Set a **fallback token** with `npx wrangler secret put GITHUB_TOKEN`. People without
-  their own token then commit through it (as that token's account).
+The first deploy creates the Worker and the Durable Object migration, and prints a
+`*.workers.dev` URL. Add it as the app's callback URL if you hadn't already.
 
-Repositories must have at least one commit: GitHub's Git Data API doesn't work on empty
-repos.
+**Optional:** a custom domain (`"routes": [{ "pattern": "diagrams.example.com",
+"custom_domain": true }]`, or via the dashboard); logs with `npx wrangler tail` or
+`"observability": { "enabled": true }`; CI deploys with a `CLOUDFLARE_API_TOKEN`.
 
-**Then, before sharing it, add access control.** There's no built-in auth yet (see
-below). The quickest safe option is
-[Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/applications/configure-apps/self-hosted-public-app/)
-in front of the whole hostname, allowing your team's email domain or an identity
-provider. It's free for up to 50 users and needs no code changes.
-
-**Optional:**
-
-- **Custom domain:** add `"routes": [{ "pattern": "diagrams.example.com", "custom_domain": true }]`
-  to `wrangler.jsonc`, or attach it in the dashboard (Workers → mergit → Settings →
-  Domains & Routes).
-- **Logs:** `npx wrangler tail` streams live logs. Enable Workers Logs in
-  `wrangler.jsonc` (`"observability": { "enabled": true }`) to keep them.
-- **CI deploys:** the build needs Rust with the wasm target, Node, and a
-  `CLOUDFLARE_API_TOKEN` with *Workers Scripts: Edit*. The production checklist
-  below sketches the workflow.
-
-**Data and backups.** For GitHub-backed boards, GitHub holds the committed history, and
-the board can be rebuilt from it at any time (see [GitHub storage](#github-storage)).
-Uncommitted live edits exist only in the board's Durable Object (Cloudflare-managed
-SQLite, which supports point-in-time recovery). Boards stored "on this server only" have
-no copy outside Cloudflare, apart from **Export**.
+**Data and backups.** Committed history is in your repositories, and boards can be
+rebuilt from them. Only *uncommitted* live edits, sessions and cached access live
+in Cloudflare (Durable Object SQLite, with point-in-time recovery).
 
 **Changing the storage schema later:** Durable Object classes are versioned through
 `migrations` in `wrangler.jsonc`, and table changes go in each class's constructor
 (`CREATE TABLE IF NOT EXISTS …`). Add new tables or columns; never rename the classes.
+
+## Security
+
+What's in place:
+
+- **No tokens in browsers.** The app's installation tokens (1 hour, scoped to the
+  installed repos) and people's user tokens stay in Durable Objects. Browsers hold
+  only an opaque, `HttpOnly` session cookie.
+- **Access follows GitHub.** Every board request is authorised against the person's
+  current permission on the board's repository; view-only users are enforced
+  server-side. Board identity headers are set by the Worker, never taken from the
+  client.
+- **Authorship can't be forged.** Commit authors must match the session, and presence
+  names come from the session.
+- **Cross-site protection.** Writes and WebSocket upgrades must carry our own `Origin`
+  and a JSON body. Sign-in uses a `state` cookie, and post-login redirects only go to
+  local paths.
+- **Headers on every response:** a strict Content-Security-Policy (scripts only from
+  this origin, no inline scripts, no framing), `nosniff`,
+  `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, and HSTS over HTTPS.
+  Mermaid runs with `securityLevel: "strict"`, and user text is inserted as text.
+- **Limits:** request bodies up to 5 MB, live-edit messages up to 1 MB, and object
+  shape and size checks on every push.
+- **Repos are protected from mergit itself:** it never writes outside a board's folder,
+  never takes over folders it didn't create, and only fast-forwards branches.
+
+Known gaps are in the production checklist below.
 
 ## Project layout
 
@@ -326,17 +355,18 @@ core/            Rust crate (mergit-core), compiled to native for tests and to W
   src/lib.rs       JSON request dispatch + the wasm ABI (gm_alloc / gm_call / gm_free)
 client/          Browser code, bundled by esbuild into web/build/
   board.js         the board page: canvas, editor, version control panel, presence
-  home.js          board list, create, import
+  home.js          sign-in, board list, create dialog with repo + folder pickers
   doc.js           Yjs schema for a branch's live state (also used by the worker)
   sync.js          WebSocket session: Yjs updates + JSON control messages
   core.js          loads and calls the wasm core
 worker/          Cloudflare Worker
-  index.js         router: /api/* → Durable Objects, /b/:id → board page, everything else → assets
-  board.js         Board Durable Object (objects, refs, live documents, presence)
-  git-store.js     GitHub as source of truth: write commits/branches, rebuild history
-  github.js        minimal GitHub REST client (Git Data API)
+  index.js         routing, sign-in gate, origin checks, security headers
+  directory.js     Directory DO: accounts, sessions, repo access, board list
+  board.js         Board DO: live documents, presence, ref updates, GitHub writes
+  app-auth.js      GitHub App: JWTs, installation tokens, user sign-in
+  git-store.js     mergit history ↔ git commits; rebuild from git
+  github.js        minimal GitHub REST client
   objects.js       canonical mergit object encoding in JS (matches the Rust core)
-  directory.js     Directory Durable Object (board list)
 web/             Static assets: index.html, board.html, style.css, logos
                  (pkg/, build/, vendor/ are generated by the build)
 test/            JS tests (node --test); Rust tests live in core/
@@ -346,83 +376,58 @@ scripts/         build-wasm.sh, build-web.sh, cargo.sh (finds a rustup toolchain
 
 ## Production readiness
 
-mergit works end to end, and the core flows are tested in a real browser against the
-local Workers runtime. Here's what's left before it should hold anyone's real work,
-roughly in priority order.
+mergit works end to end against the local fake GitHub: sign-in, repo and folder pickers,
+editing, commits, branches, merges, view-only and no-access users, forged-author and
+cross-site refusals, and rebuilding from git. What's left:
 
 ### Must have
 
-- [ ] **Authentication.** Today anyone with the URL can list every board and edit it.
-  Start with Cloudflare Access in front of the app. Then **take identity from the
-  verified Access JWT** (`Cf-Access-Jwt-Assertion`) in the Worker, rather than the
-  client-supplied name, for both commit authors and presence.
-- [ ] **Authorisation.** Per-board membership and roles (viewer / editor / owner), read-only
-  share links, and checks on every route *and* on WebSocket upgrade. The board list
-  should only show your boards.
-- [ ] **Server-side commit authorship.** The server currently trusts the `author` field
-  inside commits. It should stamp or verify it against the authenticated user.
-- [ ] **Limits and abuse protection.** Cap object size, objects per push, live-document
-  size, WebSocket message size and rate, and boards per user. Add Workers rate-limiting
-  rules on `/api/*`.
-- [x] ~~Deeper validation of pushes~~: object shapes and sizes are checked, and a ref
-  can only point at a commit whose whole history is present.
-- [ ] **Protect tokens in the browser.** Personal tokens live in `localStorage`, so any
-  XSS would expose them. Ship a strict Content-Security-Policy first. Then move to
-  "Sign in with GitHub" (an OAuth or GitHub App user token, held server-side in an
-  encrypted, `HttpOnly` session), so the browser never holds a long-lived token.
-- [ ] **A GitHub App** for organisations: per-org installs, short-lived tokens, scoped
-  repository access, and a repo picker at board creation.
-- [ ] **One board per folder.** Refuse to create a second live board on a folder that's
-  already connected (today they'd block each other's commits).
-- [ ] **GitHub failure modes.** Retry transient 5xx errors and secondary rate limits with
-  backoff. Surface "GitHub is down, commits are paused" clearly. Large histories may hit
-  the 5,000 requests/hour limit during a rebuild.
-- [ ] **Delete and rename** for boards and branches (the API can delete a branch; the UI
-  can't), with confirmation and recovery.
-- [ ] **Backups for server-only boards** (GitHub-backed boards are recoverable from git), and a
-  tested restore runbook for both.
-- [ ] **CI.** On every PR: `cargo test`, build the WASM and bundle, and run Worker tests.
-  On merge to `main`: deploy, with the Cloudflare API token as a secret.
-- [ ] **Tests beyond the core.** Worker tests with `@cloudflare/vitest-pool-workers` (ref
-  compare-and-swap, pack walks, document seeding and compaction, hibernation), plus a
-  Playwright suite for the two-user flows checked by hand so far: live edit, commit
-  race, shared merge resolution, branch carry, and a restart.
-- [ ] **Error reporting.** Enable Workers Logs/observability, and add client-side error
-  reporting (e.g. Sentry) so failed pushes and render errors are visible.
+- [ ] **Test against real GitHub.** Register the app and run the full flow, including token
+  refresh, an org that requires approval, and a large repo.
+- [ ] **React to app changes.** Handle `installation` / `installation_repositories`
+  webhooks (repos removed, app uninstalled), so boards whose repo is gone fail clearly
+  and cached access is dropped immediately rather than within 5 minutes.
+- [ ] **GitHub failure modes.** Retry transient 5xx and secondary rate limits with
+  backoff. Show "GitHub is unavailable, commits are paused" clearly. Large histories
+  may hit rate limits during a rebuild.
+- [ ] **Encrypt user tokens at rest** in the Directory, with a key from a Worker secret,
+  and add a "sign out everywhere" option.
+- [ ] **Rate limiting** on `/api/*` and `/auth/*` (Cloudflare rate-limiting rules), and
+  limits on boards per person.
+- [ ] **CI.** On every PR: `cargo test`, build, the JS tests, and Worker tests. On merge to
+  `main`: deploy.
+- [ ] **Worker and end-to-end tests** in CI: `@cloudflare/vitest-pool-workers` for refs,
+  rebuild, sessions and access, plus Playwright against the fake GitHub for the
+  two-person flows.
+- [ ] **Error reporting:** Workers observability, plus client-side error capture.
+- [ ] **Delete and rename** for boards and branches in the UI.
 
 ### Should have
 
-- [ ] **Undo/redo** (Yjs `UndoManager`, scoped to your own changes).
-- [ ] **Offline resilience.** Persist the live document in IndexedDB (`y-indexeddb`) so a
-  closed tab doesn't lose unsynced edits. Send a state-vector diff on reconnect rather
-  than the whole document.
-- [ ] **Scale the history.** Opening a board downloads its entire history. Fetch
-  recent commits first and the rest lazily, and keep objects in IndexedDB between visits.
-- [ ] **Document growth.** Snapshot or garbage-collect each branch's Yjs document after
-  commits, so tombstones don't pile up on long-lived branches.
-- [ ] **Presence efficiency.** Presence is broadcast to the whole board on every cursor
-  move. Send it only to the same branch, and send deltas.
-- [ ] **Protocol versioning.** Add a version to the WebSocket handshake and API so old tabs
-  get a clear "please reload" after a deploy, not subtle breakage.
-- [ ] **Security headers.** A Content-Security-Policy (scripts from self only), plus
-  `X-Content-Type-Options` and a referrer policy. Mermaid already runs with
-  `securityLevel: "strict"`, and user text is rendered with `textContent`.
-- [ ] **Smaller downloads.** Run `wasm-opt` on the core. Only load the Mermaid diagram types
-  a board uses (the vendored Mermaid is ~3.6 MB).
-- [ ] **Accessibility and mobile.** Keyboard navigation of frames, screen-reader labels,
-  and touch gestures (pinch zoom, long-press).
+- [ ] **People without GitHub accounts:** email or Google sign-in plus workspace invites.
+  Writes already go through the app, so they'd need no GitHub access at all.
+- [ ] **Import outside edits** (e.g. a PR changing `.mmd` files) as mergit commits,
+  merged into the live copy, instead of refusing them.
+- [ ] **Choose a branch** other than the repo's default when creating a board.
+- [ ] **Scale the Directory:** it's a single Durable Object, which is fine for a team
+  but not for thousands of users. Shard sessions and accounts if needed.
+- [ ] **Undo/redo** (Yjs `UndoManager`).
+- [ ] **Offline resilience:** keep the live document in IndexedDB; send state-vector
+  diffs on reconnect.
+- [ ] **Scale the history:** fetch recent commits first, the rest lazily.
+- [ ] **Document growth:** snapshot or garbage-collect Yjs documents after commits.
+- [ ] **Protocol versioning,** so stale tabs get a "please reload" after a deploy.
+- [ ] **Smaller downloads:** `wasm-opt` on the core, and loading only the Mermaid
+  diagram types a board uses.
+- [ ] **Accessibility and mobile:** keyboard navigation of frames, screen-reader labels,
+  touch gestures.
 
 ### Features on the roadmap
 
-- [ ] **Import outside edits from GitHub**: turn changes made directly to a board's folder
-  (e.g. in a PR) into mergit commits, merged into the live working copy, instead of
-  refusing them. A push webhook would let this happen immediately.
-- [ ] **Connect existing boards to GitHub** (and disconnect them), with their history
-  written out in one go.
-- [ ] **Semantic diff and merge** for sequence, class, state and ER diagrams, and an
-  in-diagram visual diff (highlight added and removed nodes).
-- [ ] **A conflict resolver UI**: pick ours / theirs / both per hunk, with live previews.
-- [ ] **Comments** pinned to diagrams and nodes, and a review flow ("propose changes" → merge).
+- [ ] Semantic diff and merge for sequence, class, state and ER diagrams, and an
+  in-diagram visual diff.
+- [ ] A conflict resolver UI (ours / theirs / both per hunk, with previews).
+- [ ] Comments pinned to diagrams and nodes, and a review flow ("propose changes" → merge).
 
 ## License
 
