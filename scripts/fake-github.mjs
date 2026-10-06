@@ -4,16 +4,52 @@
 //   node scripts/fake-github.mjs            # listens on http://127.0.0.1:8788
 //
 // Any repository you ask for exists, starting with one commit on `main`.
+//
+// GitHub App behaviour: one installation (id 1) on the "acme" account with
+// acme/diagrams and acme/platform. Sign-in shows a form where you type any
+// username; "viewer" gets read-only access and "outsider" gets none.
+// App JWTs are verified against FAKE_APP_PUBLIC_KEY (a PEM file), if set.
 // Test helpers (not GitHub APIs):
 //   GET  /_log/:owner/:repo/:branch          text log of the branch, with each commit's files
 //   GET  /_file/:owner/:repo/:branch/<path>  raw file contents at the branch tip
 //   POST /_commit/:owner/:repo/:branch       {path, content, message}: someone else's commit
 //   GET  /web/...                            stands in for github.com links
 
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, verify } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 
 const port = Number(process.env.PORT ?? 8788);
+const appPublicKey = process.env.FAKE_APP_PUBLIC_KEY ? createPublicKey(readFileSync(process.env.FAKE_APP_PUBLIC_KEY)) : null;
+const INSTALLATION = { id: 1, account: "acme", repos: ["acme/diagrams", "acme/platform"] };
+const fail = (status, message) => Object.assign(new Error(message), { status });
+
+/** Who a token is: user tokens are ghu_<login>, installation tokens ghs_… (the App). */
+function identity(token) {
+  if (token.startsWith("ghu_")) return { kind: "user", login: token.slice(4) };
+  if (token.startsWith("ghs_")) return { kind: "app", login: "mergit-dev[bot]" };
+  return { kind: "user", login: (token === "fake-token" ? "fake-user" : token).replace(/[^\w-]/g, "").slice(0, 39) || "user" };
+}
+
+const userId = (login) => [...login].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 1e7, 7);
+const permissionsFor = (login) =>
+  login === "outsider" ? null : login === "viewer" ? { pull: true, push: false, admin: false } : { pull: true, push: true, admin: false };
+
+function verifyAppJwt(jwt) {
+  const [h, p, sig] = jwt.split(".");
+  if (!sig) throw fail(401, "A JSON web token could not be decoded");
+  const payload = JSON.parse(Buffer.from(p, "base64url").toString());
+  if (appPublicKey && !verify("RSA-SHA256", Buffer.from(`${h}.${p}`), appPublicKey, Buffer.from(sig, "base64url"))) {
+    throw fail(401, "JWT signature does not match");
+  }
+  if (payload.exp < Date.now() / 1000) throw fail(401, "JWT expired");
+  if (process.env.FAKE_APP_ID && String(payload.iss) !== process.env.FAKE_APP_ID) throw fail(401, "JWT issuer mismatch");
+}
+
+const page = (body) => ({
+  html: `<!doctype html><meta charset="utf-8"><title>Fake GitHub</title>
+<body style="font:15px system-ui;max-width:420px;margin:80px auto;padding:0 16px">${body}</body>`,
+});
 const repos = new Map();
 let clock = Date.parse("2026-01-01T00:00:00Z");
 
@@ -143,13 +179,57 @@ function route(method, path, query, body, token) {
     repo.refs.set(m[2], sha);
     return { json: { sha } };
   }
+  if (path === "/web/login/oauth/authorize") {
+    const q = (k) => String(query.get(k) ?? "").replace(/"/g, "&quot;");
+    return page(`<h2>Sign in to Fake GitHub</h2>
+<p>Authorize <b>mergit-dev</b> as any user. <code>viewer</code> has read-only access; <code>outsider</code> has none.</p>
+<form action="/web/login/oauth/approve">
+  <input type="hidden" name="redirect_uri" value="${q("redirect_uri")}"><input type="hidden" name="state" value="${q("state")}">
+  <p><input name="login" value="samcolson4" autofocus style="font:inherit;padding:6px;width:100%"></p>
+  <button style="font:inherit;padding:6px 14px">Authorize</button>
+</form>`);
+  }
+  if (path === "/web/login/oauth/approve") {
+    const login = String(query.get("login") ?? "").replace(/[^\w-]/g, "") || "user";
+    const target = new URL(query.get("redirect_uri"));
+    target.searchParams.set("code", `code_${login}`);
+    target.searchParams.set("state", query.get("state") ?? "");
+    return { redirect: target.toString() };
+  }
+  if (path === "/web/login/oauth/access_token" && method === "POST") {
+    if (body.client_secret !== "fake-secret") return { json: { error: "incorrect_client_credentials" } };
+    const login = body.grant_type === "refresh_token" ? body.refresh_token?.replace(/^ghr_/, "") : body.code?.replace(/^code_/, "");
+    if (!login) return { json: { error: "bad_verification_code" } };
+    return {
+      json: { access_token: `ghu_${login}`, token_type: "bearer", expires_in: 28_800, refresh_token: `ghr_${login}`, refresh_token_expires_in: 15_811_200 },
+    };
+  }
+  if ((m = path.match(/^\/web\/apps\/([^/]+)\/installations\/new$/))) {
+    return page(`<h2>Fake GitHub</h2><p><b>${m[1]}</b> is installed on <b>${INSTALLATION.account}</b> with ${INSTALLATION.repos.join(", ")}.</p>`);
+  }
   if (path.startsWith("/web/")) return { text: `fake github.com page for ${path.slice(4)}\n` };
 
+  if ((m = path.match(/^\/app\/installations\/(\d+)\/access_tokens$/)) && method === "POST") {
+    verifyAppJwt(token);
+    if (Number(m[1]) !== INSTALLATION.id) throw fail(404, "Not Found");
+    return { json: { token: `ghs_${createHash("sha1").update(String(Math.random())).digest("hex").slice(0, 20)}`, expires_at: new Date(Date.now() + 3600_000).toISOString() }, status: 201 };
+  }
+  if (path === "/user/installations" && method === "GET") {
+    const who = identity(token);
+    const installations = permissionsFor(who.login) ? [{ id: INSTALLATION.id, account: { login: INSTALLATION.account } }] : [];
+    return { json: { total_count: installations.length, installations } };
+  }
+  if ((m = path.match(/^\/user\/installations\/(\d+)\/repositories$/)) && method === "GET") {
+    const perms = permissionsFor(identity(token).login);
+    const repositories = perms && Number(m[1]) === INSTALLATION.id && Number(query.get("page") ?? 1) === 1
+      ? INSTALLATION.repos.map((full_name) => ({ full_name, private: true, default_branch: "main", permissions: perms }))
+      : [];
+    return { json: { total_count: repositories.length, repositories } };
+  }
+
   if (path === "/user" && method === "GET") {
-    // Tokens are identities here: "alex" is @alex. "bad" is rejected.
-    const login = (token === "fake-token" ? "fake-user" : token).replace(/[^\w-]/g, "").slice(0, 39) || "user";
-    if (login === "bad") throw Object.assign(new Error("Bad credentials"), { status: 401 });
-    return { json: { login, id: [...login].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 1e7, 7), name: login[0].toUpperCase() + login.slice(1) } };
+    const { login } = identity(token);
+    return { json: { login, id: userId(login), name: login[0].toUpperCase() + login.slice(1) } };
   }
   if (!(m = path.match(/^\/repos\/([^/]+\/[^/]+)(\/.*)?$/))) throw Object.assign(new Error("Not Found"), { status: 404 });
   const name = m[1];
@@ -203,7 +283,7 @@ function route(method, path, query, body, token) {
     const c = {
       type: "commit", tree: body.tree, parents: body.parents, message: body.message,
       author: { ...author, date: author.date ?? new Date(clock).toISOString() },
-      committer: token, // like GitHub: whoever's token made the commit
+      committer: identity(token).login, // like GitHub: whoever's token made the commit
     };
     const sha = put(repo, c);
     return { json: commitJson(sha, c), status: 201 };
@@ -218,6 +298,17 @@ function route(method, path, query, body, token) {
   if ((m = rest.match(/^\/git\/blobs\/([0-9a-f]{40})$/)) && method === "GET") {
     const b = get(repo, m[1], "blob");
     return { json: { sha: m[1], encoding: "base64", content: Buffer.from(b.content).toString("base64") } };
+  }
+  if ((m = rest.match(/^\/contents\/?(.*)$/)) && method === "GET") {
+    const tip = repo.refs.get(query.get("ref") ?? "main");
+    const dirPath = decodeURIComponent(m[1]);
+    const dir = tip && treeAt(repo, get(repo, tip).tree, dirPath);
+    if (!dir || get(repo, dir).type !== "tree") throw fail(404, "Not Found");
+    return {
+      json: get(repo, dir).entries.map((e) => ({
+        name: e.path, path: dirPath ? `${dirPath}/${e.path}` : e.path, sha: e.sha, type: e.type === "tree" ? "dir" : "file",
+      })),
+    };
   }
   if (rest === "/commits" && method === "GET") {
     const start = query.get("sha");
@@ -250,12 +341,22 @@ createServer(async (req, res) => {
   for await (const chunk of req) raw += chunk;
   try {
     if (!url.pathname.startsWith("/_") && !url.pathname.startsWith("/web/") && !req.headers.authorization) {
-      throw Object.assign(new Error("Requires authentication"), { status: 401 });
+      throw fail(401, "Requires authentication");
     }
-    const token = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
-    if (token === "bad") throw Object.assign(new Error("Bad credentials"), { status: 401 });
-    const out = route(req.method, url.pathname, url.searchParams, raw ? JSON.parse(raw) : {}, token);
-    if (out.text !== undefined) {
+    const token = (req.headers.authorization ?? "").replace(/^(Bearer|token)\s+/i, "");
+    if (token === "bad") throw fail(401, "Bad credentials");
+    let body = {};
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+      body = Object.fromEntries(new URLSearchParams(raw)); // form-encoded, like GitHub's OAuth endpoint accepts
+    }
+    const out = route(req.method, url.pathname, url.searchParams, body, token);
+    if (out.redirect) {
+      res.writeHead(302, { location: out.redirect }).end();
+    } else if (out.html !== undefined) {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(out.html);
+    } else if (out.text !== undefined) {
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8" }).end(out.text);
     } else {
       res.writeHead(out.status ?? 200, { "content-type": "application/json" }).end(out.json ? JSON.stringify(out.json) : undefined);
