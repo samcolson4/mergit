@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mergit</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="/logo-32.png">
+  <link rel="apple-touch-icon" href="/logo-180.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" title="All boards"><img class="logo" src="/logo-180.png" alt=""> mergit</a>
+    <div id="board-name" class="board-name"></div>
+    <div class="tool-group">
+      <button id="add-frame" class="btn primary">+ Diagram</button>
+      <div id="template-menu" class="menu" hidden></div>
+    </div>
+    <div class="tool-group">
+      <button id="zoom-out" class="btn icon" title="Zoom out">−</button>
+      <button id="zoom-reset" class="btn ghost" title="Reset zoom"><span id="zoom-label">100%</span></button>
+      <button id="zoom-in" class="btn icon" title="Zoom in">+</button>
+      <button id="zoom-fit" class="btn ghost" title="Fit board (F)">Fit</button>
+    </div>
+    <div class="spacer"></div>
+    <div class="tool-group">
+      <span id="connection" class="connection">Connecting…</span>
+      <div id="peers" class="peers"></div>
+      <button id="export" class="btn ghost" title="Download the board and its full history as JSON">Export</button>
+      <button id="share" class="btn primary">Share</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section id="canvas" class="canvas" tabindex="0">
+      <div id="banner" class="banner" hidden></div>
+      <div id="world" class="world"><div id="cursors" class="cursors"></div></div>
+      <div class="hint">Drag to pan · ⌘/Ctrl + scroll or pinch to zoom · double-click empty space for a new diagram</div>
+    </section>
+
+    <aside id="editor" class="editor" hidden>
+      <div class="editor-head">
+        <input id="frame-title" class="title-input" spellcheck="false" aria-label="Diagram title">
+        <button id="close-editor" class="btn icon" title="Close (Esc)">×</button>
+      </div>
+      <textarea id="source" spellcheck="false" aria-label="Mermaid source"></textarea>
+      <div id="source-error" class="source-error" hidden></div>
+      <div class="editor-foot">
+        <span class="muted">Mermaid source · renders live</span>
+        <button id="delete-frame" class="btn ghost danger">Delete diagram</button>
+      </div>
+    </aside>
+
+    <aside class="vcs">
+      <div class="vcs-section">
+        <div class="row">
+          <span class="branch-icon" aria-hidden="true">⑂</span>
+          <select id="branch" aria-label="Current branch"></select>
+          <button id="new-branch" class="btn ghost" title="Create a branch from HEAD">New</button>
+          <div class="tool-group">
+            <button id="merge" class="btn ghost" title="Merge another branch into this one">Merge…</button>
+            <div id="merge-menu" class="menu right" hidden></div>
+          </div>
+        </div>
+        <div id="status-line" class="status-line"></div>
+      </div>
+
+      <div class="vcs-section" id="commit-box">
+        <textarea id="message" rows="2" placeholder="Describe this change…  (⌘↵ to commit)"></textarea>
+        <div class="row">
+          <button id="commit" class="btn primary grow">Commit</button>
+          <button id="discard" class="btn ghost" title="Throw away uncommitted changes">Discard</button>
+        </div>
+      </div>
+
+      <div class="vcs-section scroll">
+        <h3 id="changes-title">Changes</h3>
+        <div id="changes" class="changes"></div>
+        <h3>History</h3>
+        <div id="history" class="history"></div>
+      </div>
+    </aside>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <div id="loading" class="loading">Opening board…</div>
+  <script type="module" src="/build/board.js"></script>
+</body>
+</html>
