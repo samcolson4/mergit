@@ -1,17 +1,11 @@
-# Copy to .dev.vars for `npm run dev`. Never commit .dev.vars.
+# Copy to .dev.vars to run `npm run dev` against a real GitHub App.
+# Never commit .dev.vars. (No App? Use `npm run dev:fake-github`.)
 #
-# Optional fallback token. Normally each person adds their own token in the
-# app ("Connect GitHub"), and commits are made as them. If this is set, people
-# without a token commit through it instead. Fine-grained, with
-# "Contents: Read and write" on the boards' repositories.
-# GITHUB_TOKEN=github_pat_...
-
-# Defaults offered when creating a board (each board can choose its own).
-GITHUB_DEFAULT_REPO=your-name/diagrams
-# Empty = the repository's default branch.
-GITHUB_DEFAULT_BRANCH=
-GITHUB_DEFAULT_DIR=diagrams
-
-# Only for testing against scripts/fake-github.mjs:
-# GITHUB_API_URL=http://127.0.0.1:8788
-# GITHUB_WEB_URL=http://127.0.0.1:8788/web
+# From the App's settings page (README → "Register the GitHub App"):
+GITHUB_APP_ID=123456
+GITHUB_APP_SLUG=your-mergit-app
+GITHUB_CLIENT_ID=Iv23li...
+GITHUB_CLIENT_SECRET=...
+# The private key: paste the PEM base64-encoded on one line, e.g.
+#   base64 < your-app.private-key.pem | tr -d '\n'
+GITHUB_APP_PRIVATE_KEY=LS0tLS1CRUdJTi...

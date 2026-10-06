@@ -6,7 +6,7 @@
   "assets": {
     "directory": "./web",
     "binding": "ASSETS",
-    "run_worker_first": ["/api/*", "/b/*"]
+    "run_worker_first": true // so every response gets the security headers
   },
   "durable_objects": {
     "bindings": [
@@ -14,15 +14,14 @@
       { "name": "DIRECTORY", "class_name": "Directory" }
     ]
   },
-  // GitHub storage. The token is a secret: `wrangler secret put GITHUB_TOKEN`
-  // (locally: put it in .dev.vars). Without a token, boards are stored only
-  // in Durable Objects.
+  // GitHub App: see README → "Hosting". Secrets (wrangler secret put …):
+  // GITHUB_CLIENT_SECRET, GITHUB_APP_PRIVATE_KEY. Plain settings below.
   "vars": {
-    "GITHUB_DEFAULT_REPO": "",
-    "GITHUB_DEFAULT_BRANCH": "",
-    "GITHUB_DEFAULT_DIR": "diagrams"
+    "GITHUB_APP_ID": "",
+    "GITHUB_APP_SLUG": "",
+    "GITHUB_CLIENT_ID": ""
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Board", "Directory"] }],
   // Rebuild the browser bundle whenever client code changes during `wrangler dev`.
-  "build": { "command": "npm run build:web", "watch_dir": "client" }
+  "build": { "command": "npm run build:web", "watch_dir": ["client", "worker"] }
 }
