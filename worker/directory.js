@@ -6,16 +6,23 @@
 //    person can read or write, refreshed from GitHub every few minutes
 //  * the board list      — each board's repo, folder and installation
 //
+//  * the GitHub App's credentials, when created through the in-app setup
+//    (GitHub's manifest flow) rather than set in the environment
+//
 // Access to a board follows access to its repository: write → edit, read → view.
 
 import { DurableObject } from "cloudflare:workers";
-import { apiBase, authorizeUrl, installationClient, installUrl, missingAppConfig, userToken } from "./app-auth.js";
+import {
+  apiBase, appManifest, authorizeUrl, convertManifest, envAppConfig, installationClient, installUrl,
+  manifestAction, primeAppConfig, userToken,
+} from "./app-auth.js";
 import { GitHub } from "./github.js";
 
 const SESSION_DAYS = 30;
 const ACCESS_TTL = 5 * 60_000; // re-check repo access after this long
 const SESSION_COOKIE = "mergit_session";
 const STATE_COOKIE = "mergit_oauth";
+const SETUP_COOKIE = "mergit_setup";
 
 const json = (data, status = 200, headers = {}) => Response.json(data, { status, headers });
 
@@ -57,6 +64,7 @@ export class Directory extends DurableObject {
          token TEXT NOT NULL, token_expires INTEGER NOT NULL, refresh TEXT, refresh_expires INTEGER,
          access_checked INTEGER NOT NULL DEFAULT 0)`,
       "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires INTEGER NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS app_config (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL)",
       `CREATE TABLE IF NOT EXISTS repo_access (
          user_id INTEGER NOT NULL, repo TEXT NOT NULL, installation_id INTEGER NOT NULL,
          permission TEXT NOT NULL, default_branch TEXT NOT NULL, private INTEGER NOT NULL,
@@ -64,11 +72,36 @@ export class Directory extends DurableObject {
     ]) this.sql.exec(ddl);
   }
 
+  /** App credentials set in the environment win; otherwise those created by setup. */
+  appConfig() {
+    const fromEnv = envAppConfig(this.env);
+    if (fromEnv) return { ...fromEnv, source: "env" };
+    const row = this.sql.exec("SELECT data FROM app_config WHERE id = 1").toArray()[0];
+    return row ? { ...JSON.parse(row.data), source: "setup" } : null;
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
     const route = `${request.method} ${url.pathname}`;
+    const app = this.appConfig();
+    primeAppConfig(app);
 
     try {
+      if (route === "GET /internal/app-config") return app ? json(app) : json({ error: "Not configured" }, 404);
+      if (route === "GET /api/setup") {
+        return json({
+          configured: Boolean(app),
+          source: app?.source ?? null,
+          slug: app?.slug ?? null,
+          owner: app?.owner ?? null,
+          installUrl: app ? installUrl(this.env, app) : null,
+          needsSetupToken: Boolean(this.env.SETUP_TOKEN),
+        });
+      }
+      if (route === "POST /setup/start") return this.setupStart(await request.json(), url, app);
+      if (route === "GET /setup/callback") return await this.setupCallback(request, url, app);
+      if (!app) return json({ error: "mergit isn't connected to GitHub yet", setup: true }, 503);
+
       if (route === "GET /auth/login") return this.login(url);
       if (route === "GET /auth/callback") return await this.callback(request, url);
       if (route === "POST /auth/logout") return this.logout(request, url);
@@ -78,7 +111,7 @@ export class Directory extends DurableObject {
 
       switch (route) {
         case "GET /api/me":
-          return json({ ...publicUser(user), installUrl: installUrl(this.env) });
+          return json({ ...publicUser(user), installUrl: installUrl(this.env, this.appConfig()) });
         case "GET /api/repos":
           return json({ repos: await this.repos(user, url.searchParams.has("refresh")) });
         case "GET /api/folders":
@@ -97,22 +130,53 @@ export class Directory extends DurableObject {
     }
   }
 
+  // ---- setup: create the GitHub App with GitHub's manifest flow ----------------------
+
+  /**
+   * Returns the form the browser posts to GitHub. Until an app is configured,
+   * whoever completes this owns the configuration, so do it right after
+   * deploying, or set SETUP_TOKEN to require a code.
+   */
+  setupStart({ org, token }, url, app) {
+    if (app) return json({ error: "mergit is already connected to a GitHub App" }, 409);
+    if (this.env.SETUP_TOKEN && token !== this.env.SETUP_TOKEN) return json({ error: "That setup code isn't right" }, 403);
+    org = String(org ?? "").trim();
+    if (org && !/^[\w-]+$/.test(org)) return json({ error: "That doesn't look like a GitHub organization name" }, 400);
+    const state = randomId(16);
+    const name = `mergit ${url.hostname}`.slice(0, 34); // GitHub's limit; editable on GitHub's page
+    return json(
+      { action: manifestAction(this.env, org, state), manifest: JSON.stringify(appManifest(url.origin, name)) },
+      200,
+      { "set-cookie": cookie(SETUP_COOKIE, state, { maxAge: 3600, secure: url.protocol === "https:" }) },
+    );
+  }
+
+  async setupCallback(request, url, app) {
+    if (app) return Response.redirect(`${url.origin}/`, 302);
+    const state = readCookie(request, SETUP_COOKIE);
+    if (!state || state !== url.searchParams.get("state")) {
+      return new Response("Setup expired or was started in another browser. Please start again from the home page.", { status: 400 });
+    }
+    const code = url.searchParams.get("code");
+    if (!code) return new Response("GitHub didn't send a code.", { status: 400 });
+    const created = await convertManifest(this.env, code);
+    this.sql.exec("INSERT OR REPLACE INTO app_config (id, data) VALUES (1, ?)", JSON.stringify(created));
+    primeAppConfig(created);
+    // Straight on to GitHub's own install page, to choose which repos mergit may use.
+    const headers = new Headers({ location: installUrl(this.env, created) });
+    headers.append("set-cookie", cookie(SETUP_COOKIE, "", { maxAge: 0, secure: url.protocol === "https:" }));
+    return new Response(null, { status: 302, headers });
+  }
+
   // ---- sign in ------------------------------------------------------------------
 
   login(url) {
-    const missing = missingAppConfig(this.env);
-    if (missing.length) {
-      return new Response(`mergit's GitHub App isn't configured on this server (missing ${missing.join(", ")}). See the README.`, {
-        status: 500,
-        headers: { "content-type": "text/plain; charset=utf-8" },
-      });
-    }
     const state = randomId(16);
     const next = safeNext(url.searchParams.get("next"));
     return new Response(null, {
       status: 302,
       headers: {
-        location: authorizeUrl(this.env, `${url.origin}/auth/callback`, state),
+        location: authorizeUrl(this.env, this.appConfig(), `${url.origin}/auth/callback`, state),
         "set-cookie": cookie(STATE_COOKIE, `${state}|${next}`, { maxAge: 600, secure: url.protocol === "https:" }),
       },
     });
@@ -127,7 +191,7 @@ export class Directory extends DurableObject {
     const code = url.searchParams.get("code");
     if (!code) return new Response("GitHub didn't send an authorization code.", { status: 400 });
 
-    const t = await userToken(this.env, { code, redirect_uri: `${url.origin}/auth/callback` });
+    const t = await userToken(this.env, this.appConfig(), { code, redirect_uri: `${url.origin}/auth/callback` });
     const profile = await new GitHub(t.token, apiBase(this.env)).request("GET", "/user");
     this.sql.exec(
       `INSERT INTO users (id, login, name, token, token_expires, refresh, refresh_expires, access_checked)
@@ -162,7 +226,7 @@ export class Directory extends DurableObject {
     if (user.token_expires - Date.now() < 60_000) {
       if (!user.refresh || (user.refresh_expires && user.refresh_expires < Date.now())) return null;
       try {
-        const t = await userToken(this.env, { grant_type: "refresh_token", refresh_token: user.refresh });
+        const t = await userToken(this.env, this.appConfig(), { grant_type: "refresh_token", refresh_token: user.refresh });
         this.sql.exec(
           "UPDATE users SET token = ?, token_expires = ?, refresh = ?, refresh_expires = ? WHERE id = ?",
           t.token, t.expires, t.refresh, t.refreshExpires, user.id,

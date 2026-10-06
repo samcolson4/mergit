@@ -3,16 +3,97 @@
 //  * App JWT (RS256, signed with the app's private key) → installation access
 //    tokens: short-lived, scoped to the repos the app is installed on. All
 //    writes to GitHub use these; they never leave the server.
-//  * "Sign in with GitHub" (the App's user authorization flow) → a user token,
+//  * "Sign in with GitHub" (the App's user authorization) → a user token,
 //    used only to identify the person and read which repos they can access.
+//
+// The app's credentials come from one of:
+//  * environment (GITHUB_APP_ID, GITHUB_APP_SLUG, GITHUB_CLIENT_ID,
+//    GITHUB_CLIENT_SECRET, GITHUB_APP_PRIVATE_KEY): set by hand, takes priority
+//  * the Directory's storage: written by the in-app setup, which creates the
+//    app through GitHub's manifest flow (see directory.js)
 
 import { GitHub } from "./github.js";
 
 export const apiBase = (env) => (env.GITHUB_API_URL || "https://api.github.com").replace(/\/$/, "");
 export const webBase = (env) => (env.GITHUB_WEB_URL || "https://github.com").replace(/\/$/, "");
 
-const REQUIRED = ["GITHUB_APP_ID", "GITHUB_APP_SLUG", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "GITHUB_APP_PRIVATE_KEY"];
-export const missingAppConfig = (env) => REQUIRED.filter((k) => !env[k]);
+/** App credentials from the environment, or null if they aren't all set there. */
+export function envAppConfig(env) {
+  const cfg = {
+    appId: env.GITHUB_APP_ID,
+    slug: env.GITHUB_APP_SLUG,
+    clientId: env.GITHUB_CLIENT_ID,
+    clientSecret: env.GITHUB_CLIENT_SECRET,
+    privateKey: env.GITHUB_APP_PRIVATE_KEY,
+  };
+  return Object.values(cfg).every(Boolean) ? cfg : null;
+}
+
+let cached = { cfg: null, at: 0 };
+
+/** The Directory holds the stored config; it passes it here instead of fetching from itself. */
+export function primeAppConfig(cfg) {
+  if (cfg) cached = { cfg, at: Date.now() };
+}
+
+/** The app's credentials (from env, else from the Directory), or null before setup. */
+export async function appConfig(env) {
+  const fromEnv = envAppConfig(env);
+  if (fromEnv) return fromEnv;
+  if (cached.cfg && Date.now() - cached.at < 60_000) return cached.cfg;
+  const res = await env.DIRECTORY.get(env.DIRECTORY.idFromName("directory")).fetch("https://directory/internal/app-config");
+  const cfg = res.ok ? await res.json() : null;
+  if (cfg) cached = { cfg, at: Date.now() };
+  return cfg;
+}
+
+export async function requireAppConfig(env) {
+  const cfg = await appConfig(env);
+  if (!cfg) throw Object.assign(new Error("mergit isn't connected to GitHub yet. Open the home page to set it up."), { status: 503 });
+  return cfg;
+}
+
+// ---- manifest flow (in-app setup) ----------------------------------------------------
+
+/** The app GitHub will create: just what mergit needs, nothing more. */
+export function appManifest(origin, name) {
+  return {
+    name,
+    url: origin,
+    redirect_url: `${origin}/setup/callback`, // GitHub returns here with a code after creating the app
+    callback_urls: [`${origin}/auth/callback`], // sign-in
+    setup_url: `${origin}/?installed=1`, // after installing on repos
+    public: false,
+    default_permissions: { contents: "write", metadata: "read" },
+    default_events: [],
+    hook_attributes: { url: `${origin}/webhooks/github`, active: false },
+  };
+}
+
+/** Where to send the manifest: a personal account, or an organization. */
+export function manifestAction(env, org, state) {
+  const base = org ? `${webBase(env)}/organizations/${encodeURIComponent(org)}/settings/apps/new` : `${webBase(env)}/settings/apps/new`;
+  return `${base}?state=${encodeURIComponent(state)}`;
+}
+
+/** Exchange the code GitHub returned for the new app's credentials. */
+export async function convertManifest(env, code) {
+  const res = await fetch(`${apiBase(env)}/app-manifests/${encodeURIComponent(code)}/conversions`, {
+    method: "POST",
+    headers: { accept: "application/vnd.github+json", "user-agent": "mergit" },
+  });
+  const app = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`GitHub couldn't finish creating the app: ${app.message ?? res.status}`);
+  return {
+    appId: String(app.id),
+    slug: app.slug,
+    clientId: app.client_id,
+    clientSecret: app.client_secret,
+    privateKey: app.pem,
+    owner: app.owner?.login ?? null,
+    htmlUrl: app.html_url ?? null,
+  };
+}
 
 // ---- private key & JWT ----------------------------------------------------------
 
@@ -35,36 +116,40 @@ function pkcs1ToPkcs8(pkcs1) {
   return der(0x30, [...version, ...rsaEncryption, ...der(0x04, pkcs1)]);
 }
 
-let keyPromise = null;
-function signingKey(env) {
-  keyPromise ??= (async () => {
-    let pem = env.GITHUB_APP_PRIVATE_KEY.trim();
-    if (!pem.includes("-----BEGIN")) pem = atob(pem); // allow base64-encoded PEM (handy for env vars)
-    const body = Uint8Array.from(atob(pem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "")), (c) => c.charCodeAt(0));
-    const pkcs8 = pem.includes("BEGIN RSA PRIVATE KEY") ? pkcs1ToPkcs8(body) : body;
-    return crypto.subtle.importKey("pkcs8", pkcs8, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
-  })();
-  return keyPromise;
+const keys = new Map(); // pem → CryptoKey promise
+function signingKey(privateKey) {
+  if (!keys.has(privateKey)) {
+    keys.set(privateKey, (async () => {
+      let pem = privateKey.trim();
+      if (!pem.includes("-----BEGIN")) pem = atob(pem); // allow base64-encoded PEM (handy for env vars)
+      const body = Uint8Array.from(atob(pem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "")), (c) => c.charCodeAt(0));
+      const pkcs8 = pem.includes("BEGIN RSA PRIVATE KEY") ? pkcs1ToPkcs8(body) : body;
+      return crypto.subtle.importKey("pkcs8", pkcs8, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+    })());
+  }
+  return keys.get(privateKey);
 }
 
-async function appJwt(env) {
+async function appJwt(cfg) {
   const now = Math.floor(Date.now() / 1000);
   const header = b64url(encoder.encode(JSON.stringify({ alg: "RS256", typ: "JWT" })));
-  const payload = b64url(encoder.encode(JSON.stringify({ iat: now - 60, exp: now + 540, iss: String(env.GITHUB_APP_ID) })));
-  const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", await signingKey(env), encoder.encode(`${header}.${payload}`));
+  const payload = b64url(encoder.encode(JSON.stringify({ iat: now - 60, exp: now + 540, iss: String(cfg.appId) })));
+  const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", await signingKey(cfg.privateKey), encoder.encode(`${header}.${payload}`));
   return `${header}.${payload}.${b64url(new Uint8Array(signature))}`;
 }
 
 // ---- installation tokens --------------------------------------------------------
 
-const installationTokens = new Map(); // installation id → { token, expires } (per isolate)
+const installationTokens = new Map(); // `${appId}:${installation}` → { token, expires } (per isolate)
 
 export async function installationToken(env, installationId) {
-  const cached = installationTokens.get(installationId);
-  if (cached && cached.expires - Date.now() > 5 * 60_000) return cached.token;
-  const gh = new GitHub(await appJwt(env), apiBase(env));
+  const cfg = await requireAppConfig(env);
+  const key = `${cfg.appId}:${installationId}`;
+  const hit = installationTokens.get(key);
+  if (hit && hit.expires - Date.now() > 5 * 60_000) return hit.token;
+  const gh = new GitHub(await appJwt(cfg), apiBase(env));
   const res = await gh.request("POST", `/app/installations/${installationId}/access_tokens`);
-  installationTokens.set(installationId, { token: res.token, expires: Date.parse(res.expires_at) });
+  installationTokens.set(key, { token: res.token, expires: Date.parse(res.expires_at) });
   return res.token;
 }
 
@@ -74,17 +159,17 @@ export async function installationClient(env, installationId) {
 
 // ---- sign in with GitHub ----------------------------------------------------------
 
-export function authorizeUrl(env, redirectUri, state) {
-  const q = new URLSearchParams({ client_id: env.GITHUB_CLIENT_ID, redirect_uri: redirectUri, state });
+export function authorizeUrl(env, cfg, redirectUri, state) {
+  const q = new URLSearchParams({ client_id: cfg.clientId, redirect_uri: redirectUri, state });
   return `${webBase(env)}/login/oauth/authorize?${q}`;
 }
 
 /** Exchange an authorization code (or a refresh token) for a user access token. */
-export async function userToken(env, params) {
+export async function userToken(env, cfg, params) {
   const res = await fetch(`${webBase(env)}/login/oauth/access_token`, {
     method: "POST",
     headers: { accept: "application/json", "content-type": "application/json", "user-agent": "mergit" },
-    body: JSON.stringify({ client_id: env.GITHUB_CLIENT_ID, client_secret: env.GITHUB_CLIENT_SECRET, ...params }),
+    body: JSON.stringify({ client_id: cfg.clientId, client_secret: cfg.clientSecret, ...params }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.error || !data.access_token) {
@@ -100,4 +185,4 @@ export async function userToken(env, params) {
   };
 }
 
-export const installUrl = (env) => `${webBase(env)}/apps/${env.GITHUB_APP_SLUG}/installations/new`;
+export const installUrl = (env, cfg) => `${webBase(env)}/apps/${cfg.slug}/installations/new`;

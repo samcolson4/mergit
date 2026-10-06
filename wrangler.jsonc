@@ -14,13 +14,11 @@
       { "name": "DIRECTORY", "class_name": "Directory" }
     ]
   },
-  // GitHub App: see README → "Hosting". Secrets (wrangler secret put …):
-  // GITHUB_CLIENT_SECRET, GITHUB_APP_PRIVATE_KEY. Plain settings below.
-  "vars": {
-    "GITHUB_APP_ID": "",
-    "GITHUB_APP_SLUG": "",
-    "GITHUB_CLIENT_ID": ""
-  },
+  // GitHub: nothing to configure here. On first visit, mergit creates its
+  // GitHub App through GitHub's own flow (see README → "Hosting"). To manage
+  // the app's credentials yourself instead, set GITHUB_APP_ID, GITHUB_APP_SLUG,
+  // GITHUB_CLIENT_ID (vars) and GITHUB_CLIENT_SECRET, GITHUB_APP_PRIVATE_KEY
+  // (secrets); those take priority. Optional secret: SETUP_TOKEN.
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Board", "Directory"] }],
   // Rebuild the browser bundle whenever client code changes during `wrangler dev`.
   "build": { "command": "npm run build:web", "watch_dir": ["client", "worker"] }

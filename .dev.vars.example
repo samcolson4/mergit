@@ -1,11 +1,15 @@
-# Copy to .dev.vars to run `npm run dev` against a real GitHub App.
-# Never commit .dev.vars. (No App? Use `npm run dev:fake-github`.)
+# Usually not needed: on first visit mergit walks you through creating its
+# GitHub App (with `npm run dev`, register a localhost app; with
+# `npm run dev:fake-github`, everything is local and fake).
 #
-# From the App's settings page (README → "Register the GitHub App"):
-GITHUB_APP_ID=123456
-GITHUB_APP_SLUG=your-mergit-app
-GITHUB_CLIENT_ID=Iv23li...
-GITHUB_CLIENT_SECRET=...
-# The private key: paste the PEM base64-encoded on one line, e.g.
-#   base64 < your-app.private-key.pem | tr -d '\n'
-GITHUB_APP_PRIVATE_KEY=LS0tLS1CRUdJTi...
+# Copy to .dev.vars only to supply an existing app's credentials by hand.
+# These take priority over the in-app setup. Never commit .dev.vars.
+# GITHUB_APP_ID=123456
+# GITHUB_APP_SLUG=your-mergit-app
+# GITHUB_CLIENT_ID=Iv23li...
+# GITHUB_CLIENT_SECRET=...
+# The private key as base64 on one line:  base64 < app.private-key.pem | tr -d '\n'
+# GITHUB_APP_PRIVATE_KEY=LS0tLS1CRUdJTi...
+
+# Optional: require this code before anyone can run the first-time setup.
+# SETUP_TOKEN=some-long-random-string
