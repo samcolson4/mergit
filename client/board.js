@@ -52,6 +52,8 @@ const state = {
   peers: [],
   myId: null,
   connection: "connecting",
+  github: null, // { repo, path, branch, url } when history lives on GitHub
+  committing: false,
 };
 
 /** @type {Session | null} */
@@ -123,6 +125,9 @@ function syncRefs(refs) {
   });
   return refsQueue;
 }
+
+/** A 409 that means "someone else moved the branch first" (not a GitHub refusal). */
+const lostRace = (e) => e.status === 409 && !e.data?.github;
 
 /** Compare-and-swap a branch on the server, uploading any objects it lacks. */
 async function pushRef(name, old, next, tips = []) {
@@ -575,7 +580,7 @@ function renderVcs() {
   const live = state.connection === "live";
   $("commit-box").style.opacity = readonly() ? 0.5 : 1;
   $("message").disabled = readonly();
-  $("commit").disabled = readonly() || !live || (!status.dirty && !status.merging);
+  $("commit").disabled = state.committing || readonly() || !live || (!status.dirty && !status.merging);
   $("commit").title = live ? "" : "Reconnect to commit";
   $("discard").disabled = readonly() || (!status.dirty && !status.merging);
   $("discard").textContent = status.merging ? "Abort merge" : "Discard";
@@ -712,6 +717,12 @@ function renderHistory() {
           el("code", { textContent: short(c.hash) }),
           `${c.author} · ${ago(c.time)}`,
           c.parents.length > 1 ? "· merge" : null,
+          state.github
+            ? Object.assign(
+                el("a", { className: "gh", href: `/api/boards/${boardId}/github/commit/${c.hash}`, target: "_blank", rel: "noopener", title: "View on GitHub", textContent: "GitHub ↗" }),
+                { onclick: (e) => e.stopPropagation() },
+              )
+            : null,
         ),
       ),
     );
@@ -806,7 +817,10 @@ async function newBranch(from) {
 }
 
 async function commit() {
-  if (readonly()) return;
+  if (readonly() || state.committing) return;
+  state.committing = true;
+  $("commit").disabled = true;
+  $("commit").textContent = state.github ? "Writing to GitHub…" : "Committing…";
   await attempt(async () => {
     const branch = state.branch;
     const prev = state.remoteRefs[branch];
@@ -818,18 +832,19 @@ async function commit() {
       // Undo locally; the server's history wins.
       core.call("set_ref", { name: branch, hash: prev });
       core.call("set_merge", merge);
-      if (e.status === 409) {
+      if (lostRace(e)) {
         await syncRefs();
-        refreshVcs();
         throw new Error("Someone else committed first. Review the changes and commit again.");
       }
       throw e;
     }
     if (merge.head) setMerge(doc(), null);
     $("message").value = "";
-    refreshVcs();
-    toast(`Committed ${short(hash)} to ${branch}`);
+    toast(`Committed ${short(hash)} to ${branch}${state.github ? ` and ${state.github.repo}` : ""}`);
   });
+  state.committing = false;
+  $("commit").textContent = "Commit";
+  refreshVcs();
 }
 
 async function merge(branch) {
@@ -850,7 +865,7 @@ async function merge(branch) {
     } catch (e) {
       core.call("set_ref", { name: state.branch, hash: prev });
       core.call("set_merge", { head: null, branch: null });
-      if (e.status === 409) {
+      if (lostRace(e)) {
         await syncRefs();
         throw new Error(`${state.branch} moved on the server. Try the merge again.`);
       }
@@ -1010,6 +1025,10 @@ try {
   const info = await api(`/api/boards/${boardId}`);
   document.title = `${info.name} · mergit`;
   $("board-name").textContent = info.name;
+  state.github = info.github;
+  if (info.github) {
+    Object.assign($("github-link"), { hidden: false, href: info.github.url, title: `History is stored in ${info.github.repo}/${info.github.path}` });
+  }
   const requested = new URLSearchParams(location.search).get("branch");
   const branch = requested in info.refs ? requested : "main" in info.refs ? "main" : Object.keys(info.refs)[0];
   if (!branch) throw new Error("This board has no branches yet.");
