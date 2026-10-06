@@ -13,9 +13,8 @@ import {
   updateFrame,
 } from "./doc.js";
 import { Session } from "./sync.js";
-import { githubButton, openGithubSettings } from "./settings.js";
 import { TEMPLATES } from "./templates.js";
-import { api, el, identity, prefs, short } from "./util.js";
+import { api, currentUser, el, prefs, short, signIn } from "./util.js";
 
 const LANE_COLORS = ["#ff3670", "#0ea5e9", "#10b981", "#f59e0b", "#ef4444", "#a855f7"];
 
@@ -25,7 +24,11 @@ const world = $("world");
 const cursorsLayer = $("cursors");
 const darkQuery = matchMedia("(prefers-color-scheme: dark)");
 const boardId = location.pathname.split("/")[2];
-const me = identity();
+const me = await currentUser();
+if (!me) {
+  signIn();
+  await new Promise(() => {}); // navigating away
+}
 
 function initMermaid() {
   mermaid.initialize({
@@ -53,7 +56,8 @@ const state = {
   peers: [],
   myId: null,
   connection: "connecting",
-  github: null, // { repo, path, branch, url } when history lives on GitHub
+  github: null, // { repo, path, branch, url }: where history lives
+  role: "view", // "edit" with write access to the repo, else "view"
   committing: false,
 };
 
@@ -78,17 +82,15 @@ async function attempt(fn) {
     return await fn();
   } catch (e) {
     console.error(e);
-    if (e.data?.needsToken) {
-      if (await openGithubSettings(e.message)) toast("GitHub connected. Try that again.");
-    } else {
-      toast(e.message, true);
-    }
+    if (e.status === 401) signIn();
+    else toast(e.message, true);
   }
 }
 
 const hasMarkers = (src) => src.includes("%% <<<<<<<");
 const currentBoard = () => state.preview?.board ?? state.board;
-const readonly = () => state.preview != null;
+const viewOnly = () => state.role !== "edit";
+const readonly = () => state.preview != null || viewOnly();
 const frameById = (id) => currentBoard().frames.find((f) => f.id === id);
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
@@ -139,7 +141,7 @@ async function pushRef(name, old, next, tips = []) {
   const objects = tips.length
     ? core.call("pack", { tips, exclude: [...new Set(Object.values(state.remoteRefs))] })
     : {};
-  await api(`/api/boards/${boardId}/refs`, { method: "POST", body: { name, old, new: next, objects, by: me.name } });
+  await api(`/api/boards/${boardId}/refs`, { method: "POST", body: { name, old, new: next, objects } });
   state.remoteRefs = { ...state.remoteRefs, [name]: next };
 }
 
@@ -148,7 +150,7 @@ async function pushRef(name, old, next, tips = []) {
 function wsUrl(branch) {
   const u = new URL(`/api/boards/${boardId}/ws`, location.href);
   u.protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  u.search = new URLSearchParams({ branch, name: me.name, color: me.color });
+  u.search = new URLSearchParams({ branch }); // who you are comes from your session
   return u;
 }
 
@@ -184,7 +186,7 @@ let vcsTimer;
 function onDocUpdate() {
   state.board = docToBoard(doc());
   core.call("set_merge", getMerge(doc()));
-  if (state.editorOpen && !readonly()) syncEditor();
+  if (state.editorOpen && !state.preview) syncEditor();
   renderBoard();
   clearTimeout(vcsTimer);
   vcsTimer = setTimeout(refreshVcs, 120);
@@ -430,7 +432,7 @@ function select(id) {
 }
 
 function addFrame(template, at) {
-  if (readonly()) return toast("Close the history preview to edit", true);
+  if (readonly()) return toast(viewOnly() ? "You have view-only access to this board" : "Close the history preview to edit", true);
   const center = at ?? (() => {
     const r = canvas.getBoundingClientRect();
     return toWorld(r.left + r.width / 2, r.top + r.height / 2);
@@ -763,10 +765,12 @@ function renderBanner() {
     const { hash, entry } = state.preview;
     banner.className = "banner";
     banner.replaceChildren(
-      el("span", {}, "Viewing ", el("code", { textContent: short(hash) }), ` “${entry?.message ?? ""}” · read-only`),
-      btn("Restore this version", restoreVersion, "primary"),
-      btn("Branch from here", () => newBranch(hash)),
-      btn("Close", exitPreview),
+      ...[
+        el("span", {}, "Viewing ", el("code", { textContent: short(hash) }), ` “${entry?.message ?? ""}” · read-only`),
+        viewOnly() ? null : btn("Restore this version", restoreVersion, "primary"),
+        viewOnly() ? null : btn("Branch from here", () => newBranch(hash)),
+        btn("Close", exitPreview),
+      ].filter(Boolean),
     );
     banner.hidden = false;
   } else if (state.status.merging) {
@@ -1031,7 +1035,11 @@ try {
   document.title = `${info.name} · mergit`;
   $("board-name").textContent = info.name;
   state.github = info.github;
-  $("github-link").after(githubButton());
+  state.role = info.role;
+  if (viewOnly()) {
+    for (const id of ["commit-box", "new-branch", "merge", "add-frame"]) $(id).hidden = true;
+    $("github-link").before(el("span", { className: "view-only", textContent: "View only", title: `You can read ${info.github.repo} but not write to it` }));
+  }
   if (info.github) {
     Object.assign($("github-link"), { hidden: false, href: info.github.url, title: `History is stored in ${info.github.repo}/${info.github.path}` });
   }
@@ -1047,5 +1055,6 @@ try {
   if (!prefs.get(`view.${boardId}`)) requestAnimationFrame(fit);
 } catch (e) {
   console.error(e);
-  $("loading").textContent = e.status === 404 ? "Board not found." : `Couldn't open this board: ${e.message}`;
+  if (e.status === 401) signIn();
+  $("loading").textContent = e.status === 404 ? "Board not found." : e.status === 403 ? e.message : `Couldn't open this board: ${e.message}`;
 }

@@ -1,5 +1,6 @@
-const COLORS = ["#ff3670", "#6366f1", "#0ea5e9", "#10b981", "#f59e0b", "#ef4444", "#a855f7", "#ec4899", "#14b8a6"];
-const NAME_KEY = "mergit.name";
+import { colorFor } from "./colors.js";
+
+export { colorFor };
 
 function read(key) {
   try {
@@ -15,27 +16,24 @@ function write(key, value) {
   } catch {}
 }
 
-export function colorFor(name) {
-  let h = 0;
-  for (const ch of name) h = (h * 31 + ch.codePointAt(0)) >>> 0;
-  return COLORS[h % COLORS.length];
-}
-
-/** Who you are to collaborators. No accounts yet: just a remembered display name. */
-export function identity() {
-  let name = read(NAME_KEY);
-  if (!name) {
-    name = (prompt("What's your name? Collaborators see it, and it goes on your commits.") ?? "").trim();
-    name ||= `Guest ${Math.floor(100 + Math.random() * 900)}`;
-    write(NAME_KEY, name);
+/** The signed-in person (from their GitHub session), or null. */
+export async function currentUser() {
+  try {
+    const me = await api("/api/me");
+    return { ...me, color: colorFor(me.login) };
+  } catch (e) {
+    if (e.status === 401) return null;
+    throw e;
   }
-  return { name, color: colorFor(name) };
 }
 
-export function rename() {
-  const name = (prompt("Your name", read(NAME_KEY) ?? "") ?? "").trim();
-  if (name) write(NAME_KEY, name);
-  return name;
+export function signIn() {
+  location.href = `/auth/login?next=${encodeURIComponent(location.pathname + location.search)}`;
+}
+
+export async function signOut() {
+  await api("/auth/logout", { method: "POST", body: {} }).catch(() => {});
+  location.href = "/";
 }
 
 export const prefs = {
@@ -49,23 +47,10 @@ export const prefs = {
   set: (key, value) => write(`mergit.${key}`, JSON.stringify(value)),
 };
 
-/** The signed-in person's GitHub token, if they've added one (see settings.js). */
-function storedGithubToken() {
-  try {
-    return JSON.parse(read("mergit.github"))?.token ?? null;
-  } catch {
-    return null;
-  }
-}
-
-export async function api(path, { method = "GET", body, token = storedGithubToken() } = {}) {
+export async function api(path, { method = "GET", body } = {}) {
   const res = await fetch(path, {
     method,
-    headers: {
-      ...(body ? { "content-type": "application/json" } : {}),
-      // Only our own API ever sees it; the server uses it for this request's GitHub writes.
-      ...(token ? { "x-github-token": token } : {}),
-    },
+    headers: body ? { "content-type": "application/json" } : {},
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
@@ -79,7 +64,7 @@ export async function api(path, { method = "GET", body, token = storedGithubToke
 }
 
 /** Push every branch of the in-memory repo to a freshly created board. */
-export async function pushAllBranches(core, boardId, author) {
+export async function pushAllBranches(core, boardId) {
   const { branches } = core.call("export");
   const pushed = [];
   // main first, so the board is usable as soon as possible
@@ -87,7 +72,7 @@ export async function pushAllBranches(core, boardId, author) {
   for (const name of names) {
     const tip = branches[name];
     const objects = core.call("pack", { tips: [tip], exclude: pushed });
-    await api(`/api/boards/${boardId}/refs`, { method: "POST", body: { name, old: null, new: tip, objects, by: author } });
+    await api(`/api/boards/${boardId}/refs`, { method: "POST", body: { name, old: null, new: tip, objects } });
     pushed.push(tip);
   }
 }
