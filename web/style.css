@@ -320,3 +320,29 @@ a.btn { text-decoration: none; color: inherit; }
 .row .grow { flex: 1; }
 .dialog a { color: var(--accent); }
 .you .github-button { padding: 0; color: var(--accent); }
+
+/* ---- accounts, pickers ------------------------------------------------------------ */
+.account { display: flex; align-items: center; gap: 4px; }
+.btn.big { padding: 10px 18px; font-size: 15px; display: inline-block; }
+#signed-out p { margin-top: 12px; }
+.board-card .where { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+.board-card .tag { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; }
+.dialog select {
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; background: var(--panel-2); font-weight: 400;
+}
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field-label { font-weight: 550; }
+.path { flex: 1; font-family: var(--mono); background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button.link { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
+.picker { border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 8px; background: var(--panel-2); }
+.crumbs { display: flex; flex-wrap: wrap; gap: 2px; align-items: center; font-family: var(--mono); font-size: 12px; }
+.crumbs button { border: 0; background: none; padding: 2px 4px; border-radius: 5px; cursor: pointer; color: var(--accent); font: inherit; }
+.crumbs button:hover { background: var(--accent-soft); }
+.crumbs span { color: var(--muted); }
+.folders { display: flex; flex-direction: column; max-height: 200px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.folders button { display: flex; gap: 8px; align-items: center; text-align: left; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 7px 10px; cursor: pointer; }
+.folders button:last-child { border-bottom: 0; }
+.folders button:hover { background: var(--accent-soft); }
+.folders .empty { padding: 8px 10px; color: var(--muted); }
+.picker input { flex: 1; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; background: var(--panel); }
+.view-only { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; }
