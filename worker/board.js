@@ -17,12 +17,13 @@
 import { DurableObject } from "cloudflare:workers";
 import * as Y from "yjs";
 import { replaceBoard } from "../client/doc.js";
-import { GitHub } from "./github.js";
-import { GitStore, NeedsTokenError, slug } from "./git-store.js";
+import { installationClient, webBase } from "./app-auth.js";
+import { GitStore, slug } from "./git-store.js";
+import { colorFor } from "../client/colors.js";
 import { sha256 } from "./objects.js";
 
 const BRANCH = /^[\p{L}\p{N}_][\p{L}\p{N}_\-./]*$/u;
-const COLOR = /^#[0-9a-f]{6}$/i;
+const MAX_UPDATE = 1_000_000; // bytes per live-edit message
 const COMPACT_AFTER = 200;
 
 const json = (data, status = 200) => Response.json(data, { status });
@@ -104,15 +105,10 @@ export class Board extends DurableObject {
     return this.sql.exec("SELECT data FROM objects WHERE hash = ?", hash).toArray()[0]?.data;
   }
 
-  /**
-   * GitHub access for one request: the person's own token if they sent one,
-   * else the server's fallback token (if configured).
-   */
-  gitStore(cfg = this.githubConfig, token = null) {
-    if (!cfg) return null;
-    token ||= this.env.GITHUB_TOKEN;
-    if (!token) throw new NeedsTokenError("This board's history is stored on GitHub. Add your GitHub token to continue.");
-    const gh = new GitHub(token, this.env.GITHUB_API_URL || undefined);
+  /** Writes to GitHub go through the App installation the board was created with. */
+  async gitStore(cfg = this.githubConfig) {
+    if (!cfg) throw new Error("This board isn't connected to GitHub");
+    const gh = await installationClient(this.env, cfg.installationId);
     const row = (table, key, value) => this.sql.exec(`SELECT git, root, folder FROM ${table} WHERE ${key} = ?`, value).toArray()[0] ?? null;
     return new GitStore(gh, cfg, {
       object: (h) => this.object(h),
@@ -127,22 +123,10 @@ export class Board extends DurableObject {
     });
   }
 
-  /** Who a token belongs to, cached in memory by a hash of the token. */
-  async githubUser(gh, token) {
-    this.users ??= new Map();
-    const key = await sha256(token);
-    if (!this.users.has(key)) {
-      const user = await gh.request("GET", "/user").catch(() => null);
-      if (!user) return null;
-      this.users.set(key, { id: user.id, login: user.login });
-    }
-    return this.users.get(key);
-  }
-
   githubInfo() {
     const cfg = this.githubConfig;
     if (!cfg) return null;
-    const web = (this.env.GITHUB_WEB_URL || "https://github.com").replace(/\/$/, "");
+    const web = webBase(this.env);
     return { repo: cfg.repo, path: cfg.path, branch: cfg.branch, url: `${web}/${cfg.repo}/tree/${cfg.branch}/${cfg.path}` };
   }
 
@@ -150,73 +134,70 @@ export class Board extends DurableObject {
     const url = new URL(request.url);
     const route = `${request.method} ${url.pathname.replace(/^\/api\/boards\/[^/]+/, "") || "/"}`;
 
-    const token = request.headers.get("x-github-token");
-    if (route === "POST /init") return this.init(await request.json(), token);
+    // Only the Directory (init) and the Worker (everything else, after checking
+    // the session and repo access) can reach this object; they set these.
+    if (route === "POST /init") return this.init(await request.json());
     if (this.boardName == null) return json({ error: "Board not found" }, 404);
+    const body = request.method === "POST" ? await request.json().catch(() => ({})) : null;
+    const user = JSON.parse(request.headers.get("x-mergit-user") ?? "null");
+    const role = request.headers.get("x-mergit-role");
+    if (!user || !role) return json({ error: "Sign in to continue", signIn: true }, 401);
 
     switch (route) {
       case "GET /":
-        return json({ name: this.boardName, refs: this.refs(), github: this.githubInfo() });
+        return json({ name: this.boardName, refs: this.refs(), github: this.githubInfo(), role });
       case "POST /pack": {
-        const { want, have = [] } = await request.json();
+        const { want, have = [] } = body;
         return json({ objects: this.pack(want ?? Object.values(this.refs()), have) });
       }
       case "POST /refs":
-        return this.updateRef(await request.json(), token);
+        if (role !== "edit") return json({ error: "You have view-only access to this board" }, 403);
+        return this.updateRef(body, user);
       case "GET /ws":
-        return this.connect(request, url);
+        return this.connect(request, url, user, role);
     }
     const commit = route.match(/^GET \/github\/commit\/([0-9a-f]{64})$/);
     if (commit) {
       const row = this.sql.exec("SELECT git FROM git_commits WHERE mergit = ?", commit[1]).toArray()[0];
       const info = this.githubInfo();
       if (!row || !info) return json({ error: "Not on GitHub" }, 404);
-      const web = (this.env.GITHUB_WEB_URL || "https://github.com").replace(/\/$/, "");
-      return Response.redirect(`${web}/${info.repo}/commit/${row.git}`, 302);
+      return Response.redirect(`${webBase(this.env)}/${info.repo}/commit/${row.git}`, 302);
     }
     return json({ error: "Not found" }, 404);
   }
 
   /**
-   * Create the board. With `github`, validate access and, if the folder
-   * already holds mergit history, import it: that's also how a board is
-   * recovered from GitHub.
+   * Create the board (called by the Directory, which has already checked the
+   * person can write to the repo). If the folder already holds mergit history,
+   * import it: that's also how a board is recovered from GitHub.
    */
-  async init({ name, url, github }, token) {
+  async init({ name, url, github }) {
     if (this.boardName != null) return json({ error: "Board already exists" }, 409);
+    const repo = String(github?.repo ?? "").trim();
+    const path = String(github?.path ?? "").trim().replace(/^\/+|\/+$/g, "");
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || !github.installationId) return json({ error: "Choose a repository" }, 400);
+    if (!path || path.split("/").some((p) => !p || p === "." || p === "..")) {
+      return json({ error: "Choose a folder for the board, e.g. boards/my-board" }, 400);
+    }
     let imported = 0;
-    if (github) {
-      const repo = String(github.repo ?? "").trim();
-      const path = String(github.path ?? "").trim().replace(/^\/+|\/+$/g, "");
-      if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return json({ error: "GitHub repo must look like owner/name" }, 400);
-      if (!path || path.split("/").some((p) => !p || p === "." || p === "..")) {
-        return json({ error: "Choose a folder for the board, e.g. diagrams/my-board" }, 400);
+    try {
+      const cfg = { repo, path, branch: github.branch, prefix: `mergit/${slug(path)}`, name, url, installationId: github.installationId };
+      const store = await this.gitStore(cfg);
+      if (!(await store.gh.branchSha(repo, cfg.branch))) {
+        return json({ error: `${repo} has no branch '${cfg.branch}' (an empty repository needs one commit first)` }, 400);
       }
-      try {
-        const store = this.gitStore({ repo, path, branch: "", prefix: `mergit/${slug(path)}`, name, url }, token);
-        const info = await store.gh.getRepo(repo);
-        if (info.permissions && !info.permissions.push) return json({ error: `The server's token can't write to ${repo}` }, 400);
-        const branch = String(github.branch ?? "").trim() || info.default_branch;
-        if (!(await store.gh.branchSha(repo, branch))) {
-          return json({ error: `${repo} has no branch '${branch}' (an empty repository needs one commit first)` }, 400);
-        }
-        store.cfg.branch = branch;
-        const rebuilt = await store.rebuild();
-        this.setMeta("github", JSON.stringify(store.cfg));
-        if (rebuilt) {
-          for (const [hash, data] of rebuilt.objects) this.sql.exec("INSERT OR IGNORE INTO objects (hash, data) VALUES (?, ?)", hash, data);
-          for (const [hash, m] of rebuilt.mappings) store.db.setMapping(hash, m);
-          for (const [n, s] of Object.entries(rebuilt.branchStates)) store.db.setBranchState(n, s);
-          for (const [n, h] of Object.entries(rebuilt.refs)) this.sql.exec("INSERT INTO refs (name, hash) VALUES (?, ?)", n, h);
-          imported = rebuilt.commits;
-        }
-      } catch (e) {
-        this.sql.exec("DELETE FROM meta");
-        if (e.needsToken) return json({ error: e.message, needsToken: true }, 401);
-        const status = e.status === 401 || e.status === 403 || e.status === 404 ? 400 : (e.status ?? 500);
-        const message = e.status === 404 ? `Couldn't find ${repo}, or your token doesn't have access to it` : e.message;
-        return json({ error: message }, status);
+      const rebuilt = await store.rebuild();
+      this.setMeta("github", JSON.stringify(cfg));
+      if (rebuilt) {
+        for (const [hash, data] of rebuilt.objects) this.sql.exec("INSERT OR IGNORE INTO objects (hash, data) VALUES (?, ?)", hash, data);
+        for (const [hash, m] of rebuilt.mappings) store.db.setMapping(hash, m);
+        for (const [n, s] of Object.entries(rebuilt.branchStates)) store.db.setBranchState(n, s);
+        for (const [n, h] of Object.entries(rebuilt.refs)) this.sql.exec("INSERT INTO refs (name, hash) VALUES (?, ?)", n, h);
+        imported = rebuilt.commits;
       }
+    } catch (e) {
+      this.sql.exec("DELETE FROM meta");
+      return json({ error: e.message }, e.status === 409 ? 409 : 502);
     }
     this.setMeta("name", name);
     this.setMeta("url", url ?? "");
@@ -259,11 +240,18 @@ export class Board extends DurableObject {
     return true;
   }
 
-  async updateRef({ name, old = null, new: next = null, objects = {}, by = "someone" }, token) {
+  async updateRef({ name, old = null, new: next = null, objects = {} }, user) {
     if (!validBranch(name)) return json({ error: `'${name}' is not a valid branch name` }, 400);
+    const firstPush = Object.keys(this.refs()).length === 0;
     for (const [hash, data] of Object.entries(objects)) {
       if (typeof data !== "string" || (await sha256(data)) !== hash || !validObject(data)) {
         return json({ error: `Object ${hash.slice(0, 7)} failed verification` }, 400);
+      }
+      // You can only author commits as yourself. (A board's very first push may
+      // carry imported history by other people.)
+      const o = JSON.parse(data);
+      if (o.type === "commit" && !firstPush && o.author !== user.name && !this.object(hash)) {
+        return json({ error: `Commits must be authored as ${user.name}` }, 403);
       }
     }
     for (const [hash, data] of Object.entries(objects)) {
@@ -272,12 +260,12 @@ export class Board extends DurableObject {
 
     // Ref updates wait for GitHub, so they're queued: the compare-and-swap
     // and the GitHub write happen as one step per board.
-    const run = this.refQueue.then(() => this.applyRef(name, old, next, by, token));
+    const run = this.refQueue.then(() => this.applyRef(name, old, next, user));
     this.refQueue = run.catch(() => {});
     return run;
   }
 
-  async applyRef(name, old, next, by, token) {
+  async applyRef(name, old, next, user) {
     const current = this.refs()[name] ?? null;
     if (current !== old) return json({ error: "The branch moved on the server", current }, 409);
     if (next) {
@@ -290,18 +278,13 @@ export class Board extends DurableObject {
     }
 
     try {
-      const store = this.gitStore(this.githubConfig, token);
-      if (store) {
-        // Commits are made by the token's owner; link them to their GitHub profile.
-        const me = await this.githubUser(store.gh, token || this.env.GITHUB_TOKEN);
-        if (me) store.email = `${me.id}+${me.login}@users.noreply.github.com`;
-        await store.writeBranch(name, old, next);
-      }
+      const store = await this.gitStore();
+      // The App makes the commit; the person is its author, linked to their GitHub profile.
+      store.email = `${user.id}+${user.login}@users.noreply.github.com`;
+      await store.writeBranch(name, old, next);
     } catch (e) {
-      if (e.needsToken) return json({ error: e.message, needsToken: true, github: true }, 401);
       console.error("GitHub write failed:", e.message);
-      const message = e.status === 401 ? "GitHub rejected your token (expired or revoked?). Update it in GitHub settings." : e.message;
-      return json({ error: message, github: true, needsToken: e.status === 401 }, e.status === 409 ? 409 : e.status === 401 ? 401 : 502);
+      return json({ error: e.message, github: true }, e.status === 409 ? 409 : 502);
     }
 
     if (next) {
@@ -311,7 +294,7 @@ export class Board extends DurableObject {
       this.sql.exec("DELETE FROM doc_updates WHERE branch = ?", name);
       this.docs.delete(name);
     }
-    this.broadcast({ type: "ref", name, hash: next, by: String(by).slice(0, 40) });
+    this.broadcast({ type: "ref", name, hash: next, by: user.name });
     return json({ ok: true });
   }
 
@@ -352,17 +335,18 @@ export class Board extends DurableObject {
     this.sql.exec("INSERT INTO doc_updates (branch, data) VALUES (?, ?)", branch, toBuffer(Y.encodeStateAsUpdate(doc)));
   }
 
-  connect(request, url) {
+  connect(request, url, user, role) {
     if (request.headers.get("Upgrade") !== "websocket") return json({ error: "Expected a WebSocket" }, 426);
     const branch = url.searchParams.get("branch") ?? "main";
     if (!(branch in this.refs())) return json({ error: `No branch '${branch}'` }, 404);
 
     const [client, server] = Object.values(new WebSocketPair());
-    const color = url.searchParams.get("color") ?? "";
     const peer = {
       id: crypto.randomUUID().slice(0, 8),
-      name: (url.searchParams.get("name") || "Anonymous").slice(0, 40),
-      color: COLOR.test(color) ? color : "#ff3670",
+      name: user.name,
+      login: user.login,
+      color: colorFor(user.login),
+      role,
       branch,
       selected: null,
       cursor: null,
@@ -396,6 +380,11 @@ export class Board extends DurableObject {
       return;
     }
 
+    if (peer.role !== "edit") return; // view-only: live edits are ignored
+    if (message.byteLength > MAX_UPDATE) {
+      ws.close(1009, "Update too large");
+      return;
+    }
     const doc = this.loadDoc(peer.branch);
     try {
       Y.applyUpdate(doc, new Uint8Array(message));
