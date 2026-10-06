@@ -176,6 +176,9 @@ nothing is ever lost without polluting the real history.
    be rebuilt from git. There are no server-only boards.
 2. **A GitHub App does all writes,** with installation tokens: short-lived, scoped to the
    repos the app is installed on, server-side only. No personal access tokens.
+   It's created on first run with GitHub's **manifest flow** (one click to GitHub's own
+   "Create GitHub App" page, pre-filled; the credentials come back to mergit), then
+   installed on chosen repos with GitHub's normal install page. No manual registration.
 3. **Sign in with GitHub** (the App's user authorization) identifies people, and **access
    follows repository permission:** write → edit, read → view, none → no access.
 4. **Identity is separable from storage.** Because the app (not the person) writes to

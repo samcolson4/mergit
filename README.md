@@ -52,19 +52,20 @@ npm run dev:fake-github   # everything, against a local fake GitHub: http://loca
 npm test                  # Rust core tests + JS tests
 ```
 
-`dev:fake-github` needs no GitHub App or repository. It runs
+`dev:fake-github` needs no GitHub account, app or repository. It runs
 [`scripts/fake-github.mjs`](scripts/fake-github.mjs), an in-memory stand-in for the
-parts of the GitHub API mergit uses (sign-in, app installations, git data), with real
-JWT signature checks.
+parts of GitHub mergit uses (app creation, installs, sign-in, git data), with real JWT
+signature checks. You go through the same first-run steps as production:
 
-- **Signing in:** "Sign in with GitHub" shows a fake authorize page where you type any
-  username. `viewer` gets read-only access and `outsider` gets none.
-- **Repositories:** the fake app is installed on `acme/diagrams` and `acme/platform`.
+- **Connecting:** **Connect mergit to GitHub → Create GitHub App → Install** connects
+  the app to `acme/diagrams` and `acme/platform`.
+- **Signing in:** type any username. `viewer` gets read-only access and `outsider` gets
+  none.
 - **Seeing what was written:** `curl http://127.0.0.1:8788/_log/acme/diagrams/main`.
+- **Restarting the fake** clears its memory, so also delete `.wrangler/state`.
 
-To run against **real GitHub** locally, [register a GitHub App](#1-register-the-github-app)
-(add `http://localhost:8787/auth/callback` as a callback URL), copy
-[`.dev.vars.example`](.dev.vars.example) to `.dev.vars`, fill it in, and run `npm run dev`.
+To use **real GitHub** locally, run `npm run dev` and follow the same steps. They create
+a separate app on your account for `localhost`.
 
 `wrangler dev` runs the real Workers runtime locally, Durable Objects and SQLite
 included; data lives in `.wrangler/` (delete it to start fresh). Edits under `client/`
@@ -136,6 +137,8 @@ flowchart LR
   person's GitHub user token in the Directory Durable Object and sets an opaque,
   random `HttpOnly` session cookie (`SameSite=Lax`, 30 days). Tokens are refreshed
   automatically.
+- **The app** is created through GitHub's manifest flow on first run (see
+  [Hosting](#connect-github-in-the-app)); its credentials live in the Directory.
 - **Repo access** comes from GitHub: the repos the app is installed on that the person
   can access, with their permission level. It's cached for 5 minutes, and re-checked
   sooner when it's missing.
@@ -194,6 +197,8 @@ in the shared `meta`, and whoever commits next creates the merge commit.
 
 | Method & path | Purpose |
 |---|---|
+| `GET /api/setup` | Whether mergit is connected to a GitHub App yet |
+| `POST /setup/start` `{org?, token?}` → GitHub → `GET /setup/callback` | First-run: create the app from a manifest, then install it |
 | `GET /auth/login?next=` → GitHub → `GET /auth/callback` | Sign in |
 | `POST /auth/logout` | Sign out |
 | `GET /api/me` | The signed-in person, plus the app's install URL |
@@ -267,44 +272,42 @@ acme/platform @ main
 mergit is a single Worker with static assets and two Durable Object classes. It runs
 on the Workers **Free** plan (SQLite-backed Durable Objects are included) or Paid plan.
 
-### 1. Register the GitHub App
-
-GitHub → Settings → Developer settings → **GitHub Apps → New GitHub App** (or under an
-organisation's settings, to own it there):
-
-| Setting | Value |
-|---|---|
-| GitHub App name | anything unique, e.g. `acme-mergit`; its URL slug is `GITHUB_APP_SLUG` |
-| Homepage URL | your mergit URL |
-| Callback URL | `https://<your-host>/auth/callback` (add `http://localhost:8787/auth/callback` too, for local dev) |
-| Expire user authorization tokens | ✅ (mergit refreshes them) |
-| Request user authorization (OAuth) during installation | optional |
-| Webhook | uncheck **Active** (not used yet) |
-| Repository permissions | **Contents: Read and write** (Metadata: Read is added automatically) |
-| Where can this GitHub App be installed? | *Only on this account*, or *Any account* for other orgs |
-
-After creating it, note the **App ID** and **Client ID**, **generate a client secret**,
-and **generate a private key** (a `.pem` download). Then **Install App** on the
-account or org, choosing the repositories boards may live in. People see only those
-repos, and only the ones they can access themselves.
-
-### 2. Configure and deploy
+### Deploy
 
 ```bash
 npx wrangler login
-npx wrangler secret put GITHUB_CLIENT_SECRET
-npx wrangler secret put GITHUB_APP_PRIVATE_KEY < path/to/app.private-key.pem
-```
-
-Set the public settings in `wrangler.jsonc` → `vars`: `GITHUB_APP_ID`,
-`GITHUB_APP_SLUG`, `GITHUB_CLIENT_ID`. Then:
-
-```bash
 npm run deploy           # builds core + client, then `wrangler deploy`
 ```
 
 The first deploy creates the Worker and the Durable Object migration, and prints a
-`*.workers.dev` URL. Add it as the app's callback URL if you hadn't already.
+`*.workers.dev` URL (or add a custom domain first, so the app is created with it).
+
+### Connect GitHub (in the app)
+
+Open the URL **straight away**. Until it's connected, whoever does this first sets it
+up; set a `SETUP_TOKEN` secret beforehand to require a code.
+
+1. **Connect mergit to GitHub.** Choose your account or an organization, then
+   **Create GitHub App**. This is GitHub's own
+   [create-from-manifest](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest)
+   page, pre-filled with:
+   - **Contents:** read and write;
+   - **Metadata:** read;
+   - the sign-in callback URL;
+   - no webhooks, and private to the owner.
+
+   You can rename it there. GitHub hands the new app's credentials back to mergit,
+   which stores them.
+2. **Install** it on the repositories boards may live in, on GitHub's own install page.
+   People will only see those repos, and only the ones they can access themselves.
+3. **Sign in with GitHub.** Done. To add repositories later, use **Add a repository**
+   in the create-board dialog, or the app's settings on GitHub.
+
+Setup locks itself once done. To manage the app's credentials yourself instead (for
+example, an app created by hand, or one shared across environments), set
+`GITHUB_APP_ID`, `GITHUB_APP_SLUG` and `GITHUB_CLIENT_ID` as vars, and
+`GITHUB_CLIENT_SECRET` and `GITHUB_APP_PRIVATE_KEY` as secrets. Those take priority over
+the stored ones. See [`.dev.vars.example`](.dev.vars.example).
 
 **Optional:** a custom domain (`"routes": [{ "pattern": "diagrams.example.com",
 "custom_domain": true }]`, or via the dashboard); logs with `npx wrangler tail` or
@@ -322,6 +325,10 @@ in Cloudflare (Durable Object SQLite, with point-in-time recovery).
 
 What's in place:
 
+- **The app's credentials** (private key and client secret) are created by GitHub
+  during setup and stored in the Directory Durable Object, which only the Worker can
+  read; or they come from Worker secrets. First-time setup is possible only while
+  unconnected (optionally gated by `SETUP_TOKEN`), and checks a `state` cookie.
 - **No tokens in browsers.** The app's installation tokens (1 hour, scoped to the
   installed repos) and people's user tokens stay in Durable Objects. Browsers hold
   only an opaque, `HttpOnly` session cookie.
@@ -363,7 +370,7 @@ worker/          Cloudflare Worker
   index.js         routing, sign-in gate, origin checks, security headers
   directory.js     Directory DO: accounts, sessions, repo access, board list
   board.js         Board DO: live documents, presence, ref updates, GitHub writes
-  app-auth.js      GitHub App: JWTs, installation tokens, user sign-in
+  app-auth.js      GitHub App: manifest setup, JWTs, installation tokens, user sign-in
   git-store.js     mergit history ↔ git commits; rebuild from git
   github.js        minimal GitHub REST client
   objects.js       canonical mergit object encoding in JS (matches the Rust core)
@@ -376,7 +383,7 @@ scripts/         build-wasm.sh, build-web.sh, cargo.sh (finds a rustup toolchain
 
 ## Production readiness
 
-mergit works end to end against the local fake GitHub: sign-in, repo and folder pickers,
+mergit works end to end against the local fake GitHub: first-run app creation and install, sign-in, repo and folder pickers,
 editing, commits, branches, merges, view-only and no-access users, forged-author and
 cross-site refusals, and rebuilding from git. What's left:
 
@@ -390,8 +397,10 @@ cross-site refusals, and rebuilding from git. What's left:
 - [ ] **GitHub failure modes.** Retry transient 5xx and secondary rate limits with
   backoff. Show "GitHub is unavailable, commits are paused" clearly. Large histories
   may hit rate limits during a rebuild.
-- [ ] **Encrypt user tokens at rest** in the Directory, with a key from a Worker secret,
-  and add a "sign out everywhere" option.
+- [ ] **Encrypt secrets at rest** in the Directory (the app's private key and client
+  secret, and user tokens), with a key from a Worker secret. Add "sign out everywhere".
+- [ ] **Admin settings:** reconnect or rotate the GitHub App, and see which account set it
+  up. Today, changing apps means overriding with env vars or clearing the Directory.
 - [ ] **Rate limiting** on `/api/*` and `/auth/*` (Cloudflare rate-limiting rules), and
   limits on boards per person.
 - [ ] **CI.** On every PR: `cargo test`, build, the JS tests, and Worker tests. On merge to
