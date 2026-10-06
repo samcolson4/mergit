@@ -54,7 +54,7 @@ flowchart LR
   end
   Core -->|pack + compare-and-swap ref| W
   YD <-->|WebSocket: Yjs updates<br/>+ presence| B
-  B -.->|alarm-driven mirror| GH[(GitHub repo<br/>folder per board)]
+  B -->|git commits via REST,<br/>before a ref moves| GH[(GitHub repo<br/>folder per board)]
 ```
 
 * **The same Rust core** runs in every browser; the server only stores and relays.
@@ -166,46 +166,48 @@ nothing is ever lost without polluting the real history.
 * **Auth & sharing:** per-board ACLs, read-only share links, and branch protection
   ("`main` requires review").
 
-## 8. Storage & GitHub
+## 8. Storage & GitHub (built)
 
-**Primary store: one Cloudflare Durable Object per board** (built; see §13). Each board
-already behaves like its own repository. Its SQLite holds the content-addressed objects,
-the branch refs and the live Yjs documents. It's the single, strongly consistent place
-where branch updates use compare-and-swap, and the WebSocket hub for live editing.
+**Decision: GitHub is the source of truth for committed history.** A commit is
+accepted only once it has been written to GitHub as a real git commit. The Board
+Durable Object keeps the live, uncommitted working copy of each branch (a per-keystroke
+CRDT log, which git is the wrong tool for), plus a cache of objects and refs that can be
+rebuilt from GitHub. Boards can still opt out ("this server only") for local
+development or throwaway work.
 
-**GitHub is a mirror and a publishing target, not the primary store.** It can't do the
-real-time half (no sockets, roughly 5k API requests/hour per installation, ~100 ms+ per
-write, no cheap compare-and-swap at keystroke rate). It's excellent at durability,
-review, and keeping diagrams next to the code they describe.
+The trade-offs we accepted: a commit takes a second or two (4–6 GitHub API calls), and
+commits pause if GitHub is down or rate-limited. Editing never pauses.
 
-### Layout: a folder per board, not a repo per board
+### Layout: a repo + folder per board
 
 ```
-<repo>/<path>/                       e.g. acme/platform/docs/diagrams/checkout-system/
-  board.json                         frame ids, titles, geometry, frame order
-  frames/checkout-flow.mmd           one Mermaid file per frame
-  frames/login-sequence.mmd
-  README.md                          generated, with ```mermaid blocks (GitHub renders them)
+<repo>/<folder>/              e.g. acme/platform → docs/diagrams/checkout-system/
+  board.json                  frame ids, titles, geometry, file names
+  frames/<title>.mmd          one Mermaid file per frame
+  README.md                   generated: diagrams GitHub renders, plus the commit hash
 ```
 
-* A board is **connected** to `{ repo, path, branch }` through a GitHub App installation.
-  The default is one shared `diagrams` repo per team with a folder per board. Pointing a
-  board at `docs/architecture/` in an existing code repo is the killer use case.
-  Repo-per-board stays possible (`path: "/"`), but isn't the default: it means repo
-  sprawl and per-repo permissions, and boards usually belong to a project anyway.
-* **Commits map 1:1.** Each mergit commit becomes one git commit with the same author,
-  message and time, written with the Git Data API (blobs → tree → commit → update ref).
-  Merge commits keep both parents. The Board object keeps a `mergit_hash → git_sha`
-  table and pushes from a Durable Object **alarm**, so retries and rate limits never
-  block editing.
-* **Branches:** mergit `main` maps to the configured git branch. Other branches map to
-  `mergit/<board>/<branch>`. Deleting a mergit branch deletes its git branch.
-* **Direction:** one-way (mergit → GitHub) first. Two-way comes next: a push webhook turns
-  outside edits to `.mmd` files (say, in a PR) into mergit commits. Importing them is
-  just a three-way merge with the core we already have.
-* *Later option:* make mergit objects real git objects (SHA-1 git format) so the Board
-  object can speak the git protocol directly (`git clone https://mergit.dev/b/<id>`). The
-  mirror is simpler and keeps the two decoupled, so it comes first.
+* Each board chooses `{ repo, folder, branch }` at creation, with server-wide defaults.
+  Living next to the code it documents is the main use case. A shared `diagrams` repo
+  works too. Repo-per-board isn't the default (repo sprawl, permissions), but it's just
+  a choice of repo.
+* **One mergit commit → one git commit**, with `Mergit-Commit / -Parents / -Time /
+  -Author` trailers. Because mergit's object encoding is canonical (and mirrored
+  byte-for-byte in JS, `worker/objects.js`), the full history, hashes included, can be
+  rebuilt from git and verified commit by commit.
+* **Branches:** mergit `main` ↔ the chosen git branch; others ↔ `mergit/<folder-slug>/<name>`.
+* **Coexisting with code:** commits outside the folder are fine. mergit builds on top
+  of them, so git branches only fast-forward. Commits *inside* the folder that mergit
+  didn't make are detected (by comparing the folder's tree hash) and block further
+  commits rather than being overwritten.
+
+### Next
+
+* Import outside edits (PRs that touch `.mmd` files) as mergit commits, three-way
+  merged into the live working copy; a push webhook makes it immediate.
+* A GitHub App instead of a single personal access token.
+* Connecting an existing server-only board to GitHub (write out its history).
+* *Maybe later:* speak the git protocol directly (`git clone https://…/b/<id>`).
 
 ## 9. Tech stack
 
@@ -230,7 +232,8 @@ review, and keeping diagrams next to the code they describe.
 | **2. Semantic everything** (4–6 wks) | AST parsers for sequence, class, state and ER diagrams; in-diagram visual diff; structural merge; conflict resolver UI; Myers diff; property tests (`merge(a,a,b)=b`, commutativity of disjoint edits) | Two people's edits to one flowchart merge cleanly unless they truly collide |
 | **3. Visual editing** (6–8 wks) | Click/drag editing compiled to text patches; cross-frame links; ELK layout; templates gallery; Tauri desktop app; git export/import + CLI | Non-technical users can edit without touching code |
 | **4a. Collaboration core** ✅ | Cloudflare Worker + Durable Object per board; object sync (have/want) with compare-and-swap refs; live Yjs working copy per branch; presence (avatars, cursors, selections); shared merge state; board directory and share links | Two browsers co-edit, commit, branch and merge against `wrangler dev` |
-| **4b. Collaboration, production** (4–6 wks) | Accounts and auth (Cloudflare Access to start); per-board ACLs and read-only links; GitHub App mirror (§8); comments pinned to nodes; review flow ("propose changes" → merge); rate limits and size caps | A team of 5 uses it for an architecture review end to end |
+| **4b. GitHub storage** ✅ | GitHub as source of truth (§8): commits written as git commits in a chosen repo folder, branch mapping, outside-edit detection, rebuild from git; fake GitHub for local dev | History survives losing the Durable Object; rebuilt hashes match |
+| **4c. Collaboration, production** (4–6 wks) | Accounts and auth (Cloudflare Access to start); per-board ACLs and read-only links; GitHub App; import outside edits; comments pinned to nodes; review flow ("propose changes" → merge); rate limits and size caps | A team of 5 uses it for an architecture review end to end |
 
 ## 11. Risks & open questions
 
