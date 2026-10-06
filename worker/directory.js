@@ -27,8 +27,10 @@ export class Directory extends DurableObject {
       const id = newId();
       const board = this.env.BOARD.get(this.env.BOARD.idFromName(id));
       const url = `${new URL(request.url).origin}/b/${id}`;
+      const token = request.headers.get("x-github-token");
       const res = await board.fetch(`https://board/api/boards/${id}/init`, {
         method: "POST",
+        headers: token ? { "x-github-token": token } : {},
         body: JSON.stringify({ name: clean, url, github: github ?? null }),
       });
       const result = await res.json();

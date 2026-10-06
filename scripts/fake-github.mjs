@@ -107,7 +107,7 @@ const commitJson = (sha, c) => ({
   author: c.author,
 });
 
-function route(method, path, query, body) {
+function route(method, path, query, body, token) {
   let m;
   if ((m = path.match(/^\/_log\/([^/]+\/[^/]+)\/(.+)$/))) {
     const repo = repoFor(m[1]);
@@ -116,7 +116,8 @@ function route(method, path, query, body) {
       .map((sha) => [sha, get(repo, sha)])
       .sort((a, b) => Date.parse(b[1].author.date) - Date.parse(a[1].author.date));
     for (const [sha, c] of order) {
-      lines.push(`${sha.slice(0, 7)} ${c.parents.length > 1 ? "(merge) " : ""}${c.author.name}: ${c.message.split("\n")[0]}`);
+      const by = c.committer && c.committer !== c.author.name ? ` (committed by @${c.committer})` : "";
+      lines.push(`${sha.slice(0, 7)} ${c.parents.length > 1 ? "(merge) " : ""}${c.author.name} <${c.author.email}>${by}: ${c.message.split("\n")[0]}`);
       lines.push(...files(repo, c.tree).map((f) => `    ${f}`));
     }
     return { text: lines.join("\n") + "\n" };
@@ -144,6 +145,12 @@ function route(method, path, query, body) {
   }
   if (path.startsWith("/web/")) return { text: `fake github.com page for ${path.slice(4)}\n` };
 
+  if (path === "/user" && method === "GET") {
+    // Tokens are identities here: "alex" is @alex. "bad" is rejected.
+    const login = (token === "fake-token" ? "fake-user" : token).replace(/[^\w-]/g, "").slice(0, 39) || "user";
+    if (login === "bad") throw Object.assign(new Error("Bad credentials"), { status: 401 });
+    return { json: { login, id: [...login].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 1e7, 7), name: login[0].toUpperCase() + login.slice(1) } };
+  }
   if (!(m = path.match(/^\/repos\/([^/]+\/[^/]+)(\/.*)?$/))) throw Object.assign(new Error("Not Found"), { status: 404 });
   const name = m[1];
   const repo = repoFor(name);
@@ -192,8 +199,12 @@ function route(method, path, query, body) {
   if (rest === "/git/commits" && method === "POST") {
     get(repo, body.tree, "tree");
     body.parents.forEach((p) => get(repo, p, "commit"));
-    const author = body.author ?? { name: "Token Owner", email: "token@example.com" };
-    const c = { type: "commit", tree: body.tree, parents: body.parents, message: body.message, author: { ...author, date: author.date ?? new Date(clock).toISOString() } };
+    const author = body.author ?? { name: token, email: `${token}@example.com` };
+    const c = {
+      type: "commit", tree: body.tree, parents: body.parents, message: body.message,
+      author: { ...author, date: author.date ?? new Date(clock).toISOString() },
+      committer: token, // like GitHub: whoever's token made the commit
+    };
     const sha = put(repo, c);
     return { json: commitJson(sha, c), status: 201 };
   }
@@ -241,7 +252,9 @@ createServer(async (req, res) => {
     if (!url.pathname.startsWith("/_") && !url.pathname.startsWith("/web/") && !req.headers.authorization) {
       throw Object.assign(new Error("Requires authentication"), { status: 401 });
     }
-    const out = route(req.method, url.pathname, url.searchParams, raw ? JSON.parse(raw) : {});
+    const token = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+    if (token === "bad") throw Object.assign(new Error("Bad credentials"), { status: 401 });
+    const out = route(req.method, url.pathname, url.searchParams, raw ? JSON.parse(raw) : {}, token);
     if (out.text !== undefined) {
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8" }).end(out.text);
     } else {

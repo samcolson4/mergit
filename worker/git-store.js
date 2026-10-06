@@ -19,6 +19,11 @@ export class ExternalEditError extends Error {
   status = 409;
 }
 
+export class NeedsTokenError extends Error {
+  status = 401;
+  needsToken = true;
+}
+
 const EMAIL = "noreply@mergit.invalid";
 const short = (h) => h.slice(0, 7);
 
@@ -103,6 +108,7 @@ export class GitStore {
     this.gh = gh;
     this.cfg = cfg;
     this.db = db;
+    this.email = EMAIL; // replaced with the token owner's GitHub noreply address when known
   }
 
   gitBranch(name) {
@@ -147,7 +153,7 @@ export class GitStore {
       message: `${c.message}\n\n${trailers(hash, c)}`,
       tree: root,
       parents: gitParents,
-      author: { name: c.author || "mergit", email: EMAIL, date: new Date(c.time).toISOString() },
+      author: { name: c.author || "mergit", email: this.email, date: new Date(c.time).toISOString() },
     });
     const written = { git, root, folder };
     this.db.setMapping(hash, written);
@@ -226,7 +232,7 @@ export class GitStore {
           message: `${c.message}\n\n${trailers(next, c)}`,
           tree: root,
           parents: [tip, target.git],
-          author: { name: c.author || "mergit", email: EMAIL, date: new Date(c.time).toISOString() },
+          author: { name: c.author || "mergit", email: this.email, date: new Date(c.time).toISOString() },
         });
         await gh.moveBranch(repo, branch, git);
         state = { git, root, folder: target.folder };
