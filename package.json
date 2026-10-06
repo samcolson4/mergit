@@ -1,0 +1,30 @@
+{
+  "name": "mergit",
+  "version": "1.0.0",
+  "description": "Miro-style Mermaid whiteboard with built-in version control",
+  "scripts": {
+    "build:wasm": "./scripts/build-wasm.sh",
+    "build:web": "./scripts/build-web.sh",
+    "build": "npm run build:wasm && npm run build:web",
+    "dev": "npm run build && wrangler dev",
+    "deploy": "npm run build && wrangler deploy",
+    "test": "scripts/cargo.sh test --manifest-path core/Cargo.toml"
+  },
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "mermaid": "^11.17.2",
+    "yjs": "^13.6.33"
+  },
+  "private": true,
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "wrangler": "^4.147.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "esbuild@0.28.1": true,
+    "workerd@1.20261001.1": true
+  }
+}

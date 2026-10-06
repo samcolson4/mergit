@@ -1,0 +1,8 @@
+node_modules/
+core/target/
+web/pkg/
+web/build/
+web/vendor/
+.wrangler/
+.dev.vars
+.DS_Store
