@@ -8,14 +8,17 @@
 // GitHub App behaviour: one installation (id 1) on the "acme" account with
 // acme/diagrams and acme/platform. Sign-in shows a form where you type any
 // username; "viewer" gets read-only access and "outsider" gets none.
-// App JWTs are verified against FAKE_APP_PUBLIC_KEY (a PEM file), if set.
+// Apps are created through the manifest flow (settings/apps/new → code →
+// /app-manifests/:code/conversions), each with its own key pair; App JWTs are
+// verified against the issuing app's public key (or FAKE_APP_PUBLIC_KEY, for
+// an app configured by environment).
 // Test helpers (not GitHub APIs):
 //   GET  /_log/:owner/:repo/:branch          text log of the branch, with each commit's files
 //   GET  /_file/:owner/:repo/:branch/<path>  raw file contents at the branch tip
 //   POST /_commit/:owner/:repo/:branch       {path, content, message}: someone else's commit
 //   GET  /web/...                            stands in for github.com links
 
-import { createHash, createPublicKey, verify } from "node:crypto";
+import { createHash, createPublicKey, generateKeyPairSync, randomBytes, verify } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 
@@ -23,6 +26,9 @@ const port = Number(process.env.PORT ?? 8788);
 const appPublicKey = process.env.FAKE_APP_PUBLIC_KEY ? createPublicKey(readFileSync(process.env.FAKE_APP_PUBLIC_KEY)) : null;
 const INSTALLATION = { id: 1, account: "acme", repos: ["acme/diagrams", "acme/platform"] };
 const fail = (status, message) => Object.assign(new Error(message), { status });
+const apps = new Map(); // id → { id, slug, clientId, clientSecret, publicKey, manifest }
+const pendingManifests = new Map(); // code → { manifest, owner }
+const escape = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
 /** Who a token is: user tokens are ghu_<login>, installation tokens ghs_… (the App). */
 function identity(token) {
@@ -39,11 +45,15 @@ function verifyAppJwt(jwt) {
   const [h, p, sig] = jwt.split(".");
   if (!sig) throw fail(401, "A JSON web token could not be decoded");
   const payload = JSON.parse(Buffer.from(p, "base64url").toString());
-  if (appPublicKey && !verify("RSA-SHA256", Buffer.from(`${h}.${p}`), appPublicKey, Buffer.from(sig, "base64url"))) {
+  if (!apps.has(String(payload.iss)) && appPublicKey && !verify("RSA-SHA256", Buffer.from(`${h}.${p}`), appPublicKey, Buffer.from(sig, "base64url"))) {
     throw fail(401, "JWT signature does not match");
   }
+  const app = apps.get(String(payload.iss));
+  if (app && !verify("RSA-SHA256", Buffer.from(`${h}.${p}`), app.publicKey, Buffer.from(sig, "base64url"))) {
+    throw fail(401, "JWT signature does not match");
+  }
+  if (!app && !appPublicKey) throw fail(401, "Integration not found");
   if (payload.exp < Date.now() / 1000) throw fail(401, "JWT expired");
-  if (process.env.FAKE_APP_ID && String(payload.iss) !== process.env.FAKE_APP_ID) throw fail(401, "JWT issuer mismatch");
 }
 
 const page = (body) => ({
@@ -179,6 +189,20 @@ function route(method, path, query, body, token) {
     repo.refs.set(m[2], sha);
     return { json: { sha } };
   }
+  if ((m = path.match(/^\/web\/(?:organizations\/([\w-]+)\/)?settings\/apps\/new$/)) && method === "POST") {
+    const manifest = JSON.parse(body.manifest);
+    const code = `mf_${randomBytes(8).toString("hex")}`;
+    pendingManifests.set(code, { manifest, owner: m[1] ?? "samcolson4" });
+    const back = new URL(manifest.redirect_url);
+    back.searchParams.set("code", code);
+    back.searchParams.set("state", query.get("state") ?? "");
+    return page(`<h2>Create GitHub App</h2>
+<p>Owner: <b>${escape(m[1] ?? "samcolson4")}</b></p>
+<p>Name: <b>${escape(manifest.name)}</b><br>Homepage: ${escape(manifest.url)}<br>
+Callback: ${escape(manifest.callback_urls?.join(", "))}<br>
+Permissions: ${escape(Object.entries(manifest.default_permissions ?? {}).map(([k, v]) => `${k}: ${v}`).join(", "))}</p>
+<p><a href="${escape(back)}" style="display:inline-block;padding:6px 14px;background:#1f883d;color:#fff;border-radius:6px;text-decoration:none">Create GitHub App for ${escape(m[1] ?? "samcolson4")}</a></p>`);
+  }
   if (path === "/web/login/oauth/authorize") {
     const q = (k) => String(query.get(k) ?? "").replace(/"/g, "&quot;");
     return page(`<h2>Sign in to Fake GitHub</h2>
@@ -197,7 +221,8 @@ function route(method, path, query, body, token) {
     return { redirect: target.toString() };
   }
   if (path === "/web/login/oauth/access_token" && method === "POST") {
-    if (body.client_secret !== "fake-secret") return { json: { error: "incorrect_client_credentials" } };
+    const known = body.client_secret === "fake-secret" || [...apps.values()].some((a) => a.clientId === body.client_id && a.clientSecret === body.client_secret);
+    if (!known) return { json: { error: "incorrect_client_credentials" } };
     const login = body.grant_type === "refresh_token" ? body.refresh_token?.replace(/^ghr_/, "") : body.code?.replace(/^code_/, "");
     if (!login) return { json: { error: "bad_verification_code" } };
     return {
@@ -205,7 +230,33 @@ function route(method, path, query, body, token) {
     };
   }
   if ((m = path.match(/^\/web\/apps\/([^/]+)\/installations\/new$/))) {
-    return page(`<h2>Fake GitHub</h2><p><b>${m[1]}</b> is installed on <b>${INSTALLATION.account}</b> with ${INSTALLATION.repos.join(", ")}.</p>`);
+    const app = [...apps.values()].find((a) => a.slug === m[1]);
+    const done = app?.manifest.setup_url ? new URL(app.manifest.setup_url) : null;
+    done?.searchParams.set("installation_id", String(INSTALLATION.id));
+    return page(`<h2>Install ${escape(m[1])}</h2>
+<p>Install on <b>${INSTALLATION.account}</b>, with access to: ${INSTALLATION.repos.map(escape).join(", ")}.</p>
+${done ? `<p><a href="${escape(done)}" style="display:inline-block;padding:6px 14px;background:#1f883d;color:#fff;border-radius:6px;text-decoration:none">Install</a></p>` : "<p>(Installed.)</p>"}`);
+  }
+  if ((m = path.match(/^\/app-manifests\/([\w]+)\/conversions$/)) && method === "POST") {
+    const pending = pendingManifests.get(m[1]);
+    if (!pending) throw fail(404, "Not Found");
+    pendingManifests.delete(m[1]);
+    const { privateKey, publicKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: "pkcs1", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
+    const id = 1000 + apps.size;
+    const slug = pending.manifest.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const app = { id, slug, clientId: `Iv1.fake${id}`, clientSecret: randomBytes(20).toString("hex"), publicKey: createPublicKey(publicKey), manifest: pending.manifest };
+    apps.set(String(id), app);
+    return {
+      status: 201,
+      json: {
+        id, slug, name: pending.manifest.name, client_id: app.clientId, client_secret: app.clientSecret, pem: privateKey,
+        webhook_secret: null, owner: { login: pending.owner }, html_url: `http://127.0.0.1:${port}/web/apps/${slug}`,
+      },
+    };
   }
   if (path.startsWith("/web/")) return { text: `fake github.com page for ${path.slice(4)}\n` };
 
@@ -340,7 +391,8 @@ createServer(async (req, res) => {
   let raw = "";
   for await (const chunk of req) raw += chunk;
   try {
-    if (!url.pathname.startsWith("/_") && !url.pathname.startsWith("/web/") && !req.headers.authorization) {
+    const open = ["/_", "/web/", "/app-manifests/"].some((p) => url.pathname.startsWith(p));
+    if (!open && !req.headers.authorization) {
       throw fail(401, "Requires authentication");
     }
     const token = (req.headers.authorization ?? "").replace(/^(Bearer|token)\s+/i, "");
