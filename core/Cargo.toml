@@ -1,0 +1,20 @@
+[package]
+name = "mergit-core"
+version = "0.1.0"
+edition = "2024"
+description = "Content-addressed version control for Mermaid boards. Compiles to WebAssembly and native."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+codegen-units = 1
+strip = true
