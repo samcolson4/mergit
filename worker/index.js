@@ -9,6 +9,13 @@ export default {
       // Every board URL serves the same page; it reads the board id from the path.
       return env.ASSETS.fetch(new Request(new URL("/board", url), request));
     }
+    if (url.pathname === "/api/config") {
+      return Response.json({
+        github: env.GITHUB_TOKEN
+          ? { repo: env.GITHUB_DEFAULT_REPO ?? "", branch: env.GITHUB_DEFAULT_BRANCH ?? "", dir: env.GITHUB_DEFAULT_DIR ?? "diagrams" }
+          : null,
+      });
+    }
     if (url.pathname === "/api/boards") {
       return env.DIRECTORY.get(env.DIRECTORY.idFromName("directory")).fetch(request);
     }

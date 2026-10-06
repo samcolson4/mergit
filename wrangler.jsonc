@@ -14,6 +14,14 @@
       { "name": "DIRECTORY", "class_name": "Directory" }
     ]
   },
+  // GitHub storage. The token is a secret: `wrangler secret put GITHUB_TOKEN`
+  // (locally: put it in .dev.vars). Without a token, boards are stored only
+  // in Durable Objects.
+  "vars": {
+    "GITHUB_DEFAULT_REPO": "",
+    "GITHUB_DEFAULT_BRANCH": "",
+    "GITHUB_DEFAULT_DIR": "diagrams"
+  },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Board", "Directory"] }],
   // Rebuild the browser bundle whenever client code changes during `wrangler dev`.
   "build": { "command": "npm run build:web", "watch_dir": "client" }

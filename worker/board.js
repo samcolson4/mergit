@@ -1,4 +1,4 @@
-// One Durable Object per board. It is the board's remote repository:
+// One Durable Object per board.
 //
 //  * objects  — content-addressed blobs/trees/commits, exactly as mergit-core
 //               serialised them (verified by SHA-256 on the way in)
@@ -7,40 +7,93 @@
 //               working copy), relayed between WebSocket clients and
 //               persisted as an append-only update log
 //
-// The server never merges or commits: clients do that with the same Rust core.
+// For GitHub-backed boards, history's source of truth is the git repository:
+// a ref only moves here after the commit has been written to GitHub, and the
+// objects/refs tables are a cache that can be rebuilt from it (see git-store.js).
+// The live documents always stay here: they change on every keystroke.
+//
+// The server never merges or commits on its own: clients do that with the Rust core.
 
 import { DurableObject } from "cloudflare:workers";
 import * as Y from "yjs";
 import { replaceBoard } from "../client/doc.js";
+import { GitHub } from "./github.js";
+import { GitStore, slug } from "./git-store.js";
+import { sha256 } from "./objects.js";
 
 const BRANCH = /^[\p{L}\p{N}_][\p{L}\p{N}_\-./]*$/u;
 const COLOR = /^#[0-9a-f]{6}$/i;
 const COMPACT_AFTER = 200;
 
 const json = (data, status = 200) => Response.json(data, { status });
+const toBuffer = (u8) => u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
 
-async function sha256(text) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+/** Branch names must also be valid inside git ref names. */
+function validBranch(name) {
+  return (
+    typeof name === "string" &&
+    name.length <= 100 &&
+    BRANCH.test(name) &&
+    !/\.\.|\/\/|\/\.|@\{|\.lock$|[/.]$/.test(name)
+  );
 }
 
-const toBuffer = (u8) => u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+/** Reject objects the core would never produce (beyond the hash check). */
+function validObject(data) {
+  let o;
+  try {
+    o = JSON.parse(data);
+  } catch {
+    return false;
+  }
+  if (o.type === "blob") return typeof o.data === "string" && o.data.length <= 200_000;
+  if (o.type === "tree") {
+    return Array.isArray(o.entries) && o.entries.length <= 500 &&
+      o.entries.every((e) => typeof e.id === "string" && typeof e.title === "string" && typeof e.blob === "string" &&
+        [e.x, e.y, e.w, e.h].every(Number.isInteger));
+  }
+  if (o.type === "commit") {
+    return typeof o.tree === "string" && Array.isArray(o.parents) && o.parents.length <= 2 &&
+      typeof o.message === "string" && o.message.length <= 10_000 &&
+      typeof o.author === "string" && o.author.length <= 100 && !/[\n<>]/.test(o.author) &&
+      Number.isInteger(o.time);
+  }
+  return false;
+}
 
 export class Board extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.docs = new Map(); // branch → Y.Doc, rebuilt from storage after hibernation
-    this.sql.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-    this.sql.exec("CREATE TABLE IF NOT EXISTS objects (hash TEXT PRIMARY KEY, data TEXT NOT NULL)");
-    this.sql.exec("CREATE TABLE IF NOT EXISTS refs (name TEXT PRIMARY KEY, hash TEXT NOT NULL)");
-    this.sql.exec(
+    this.refQueue = Promise.resolve(); // ref updates run one at a time (they await GitHub)
+    for (const ddl of [
+      "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS objects (hash TEXT PRIMARY KEY, data TEXT NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS refs (name TEXT PRIMARY KEY, hash TEXT NOT NULL)",
       "CREATE TABLE IF NOT EXISTS doc_updates (id INTEGER PRIMARY KEY AUTOINCREMENT, branch TEXT NOT NULL, data BLOB NOT NULL)",
-    );
+      // mergit commit → the git commit it was written as
+      "CREATE TABLE IF NOT EXISTS git_commits (mergit TEXT PRIMARY KEY, git TEXT NOT NULL, root TEXT NOT NULL, folder TEXT NOT NULL)",
+      // what we last wrote to each branch's git ref
+      "CREATE TABLE IF NOT EXISTS git_branches (name TEXT PRIMARY KEY, git TEXT NOT NULL, root TEXT NOT NULL, folder TEXT NOT NULL)",
+    ]) this.sql.exec(ddl);
+  }
+
+  meta(key) {
+    return this.sql.exec("SELECT value FROM meta WHERE key = ?", key).toArray()[0]?.value ?? null;
+  }
+
+  setMeta(key, value) {
+    this.sql.exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", key, value);
   }
 
   get boardName() {
-    return this.sql.exec("SELECT value FROM meta WHERE key = 'name'").toArray()[0]?.value ?? null;
+    return this.meta("name");
+  }
+
+  get githubConfig() {
+    const raw = this.meta("github");
+    return raw ? JSON.parse(raw) : null;
   }
 
   refs() {
@@ -51,21 +104,41 @@ export class Board extends DurableObject {
     return this.sql.exec("SELECT data FROM objects WHERE hash = ?", hash).toArray()[0]?.data;
   }
 
+  gitStore(cfg = this.githubConfig) {
+    if (!cfg) return null;
+    if (!this.env.GITHUB_TOKEN) throw new Error("This board is stored on GitHub, but the server has no GITHUB_TOKEN configured");
+    const gh = new GitHub(this.env.GITHUB_TOKEN, this.env.GITHUB_API_URL || undefined);
+    const row = (table, key, value) => this.sql.exec(`SELECT git, root, folder FROM ${table} WHERE ${key} = ?`, value).toArray()[0] ?? null;
+    return new GitStore(gh, cfg, {
+      object: (h) => this.object(h),
+      mapping: (h) => row("git_commits", "mergit", h),
+      setMapping: (h, m) =>
+        this.sql.exec("INSERT OR REPLACE INTO git_commits (mergit, git, root, folder) VALUES (?, ?, ?, ?)", h, m.git, m.root, m.folder),
+      branchState: (name) => row("git_branches", "name", name),
+      setBranchState: (name, s) =>
+        s
+          ? this.sql.exec("INSERT OR REPLACE INTO git_branches (name, git, root, folder) VALUES (?, ?, ?, ?)", name, s.git, s.root, s.folder)
+          : this.sql.exec("DELETE FROM git_branches WHERE name = ?", name),
+    });
+  }
+
+  githubInfo() {
+    const cfg = this.githubConfig;
+    if (!cfg) return null;
+    const web = (this.env.GITHUB_WEB_URL || "https://github.com").replace(/\/$/, "");
+    return { repo: cfg.repo, path: cfg.path, branch: cfg.branch, url: `${web}/${cfg.repo}/tree/${cfg.branch}/${cfg.path}` };
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
     const route = `${request.method} ${url.pathname.replace(/^\/api\/boards\/[^/]+/, "") || "/"}`;
 
-    if (route === "POST /init") {
-      if (this.boardName != null) return json({ error: "Board already exists" }, 409);
-      const { name } = await request.json();
-      this.sql.exec("INSERT INTO meta (key, value) VALUES ('name', ?)", name);
-      return json({ ok: true });
-    }
+    if (route === "POST /init") return this.init(await request.json());
     if (this.boardName == null) return json({ error: "Board not found" }, 404);
 
     switch (route) {
       case "GET /":
-        return json({ name: this.boardName, refs: this.refs() });
+        return json({ name: this.boardName, refs: this.refs(), github: this.githubInfo() });
       case "POST /pack": {
         const { want, have = [] } = await request.json();
         return json({ objects: this.pack(want ?? Object.values(this.refs()), have) });
@@ -74,9 +147,59 @@ export class Board extends DurableObject {
         return this.updateRef(await request.json());
       case "GET /ws":
         return this.connect(request, url);
-      default:
-        return json({ error: "Not found" }, 404);
     }
+    const commit = route.match(/^GET \/github\/commit\/([0-9a-f]{64})$/);
+    if (commit) {
+      const row = this.sql.exec("SELECT git FROM git_commits WHERE mergit = ?", commit[1]).toArray()[0];
+      const info = this.githubInfo();
+      if (!row || !info) return json({ error: "Not on GitHub" }, 404);
+      const web = (this.env.GITHUB_WEB_URL || "https://github.com").replace(/\/$/, "");
+      return Response.redirect(`${web}/${info.repo}/commit/${row.git}`, 302);
+    }
+    return json({ error: "Not found" }, 404);
+  }
+
+  /**
+   * Create the board. With `github`, validate access and, if the folder
+   * already holds mergit history, import it: that's also how a board is
+   * recovered from GitHub.
+   */
+  async init({ name, url, github }) {
+    if (this.boardName != null) return json({ error: "Board already exists" }, 409);
+    let imported = 0;
+    if (github) {
+      const repo = String(github.repo ?? "").trim();
+      const path = String(github.path ?? "").trim().replace(/^\/+|\/+$/g, "");
+      if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return json({ error: "GitHub repo must look like owner/name" }, 400);
+      if (!path || path.split("/").some((p) => !p || p === "." || p === "..")) {
+        return json({ error: "Choose a folder for the board, e.g. diagrams/my-board" }, 400);
+      }
+      try {
+        const store = this.gitStore({ repo, path, branch: "", prefix: `mergit/${slug(path)}`, name, url });
+        const info = await store.gh.getRepo(repo);
+        if (info.permissions && !info.permissions.push) return json({ error: `The server's token can't write to ${repo}` }, 400);
+        const branch = String(github.branch ?? "").trim() || info.default_branch;
+        if (!(await store.gh.branchSha(repo, branch))) {
+          return json({ error: `${repo} has no branch '${branch}' (an empty repository needs one commit first)` }, 400);
+        }
+        store.cfg.branch = branch;
+        const rebuilt = await store.rebuild();
+        this.setMeta("github", JSON.stringify(store.cfg));
+        if (rebuilt) {
+          for (const [hash, data] of rebuilt.objects) this.sql.exec("INSERT OR IGNORE INTO objects (hash, data) VALUES (?, ?)", hash, data);
+          for (const [hash, m] of rebuilt.mappings) store.db.setMapping(hash, m);
+          for (const [n, s] of Object.entries(rebuilt.branchStates)) store.db.setBranchState(n, s);
+          for (const [n, h] of Object.entries(rebuilt.refs)) this.sql.exec("INSERT INTO refs (name, hash) VALUES (?, ?)", n, h);
+          imported = rebuilt.commits;
+        }
+      } catch (e) {
+        this.sql.exec("DELETE FROM meta");
+        return json({ error: e.message }, e.status === 401 || e.status === 403 || e.status === 404 ? 400 : (e.status ?? 500));
+      }
+    }
+    this.setMeta("name", name);
+    this.setMeta("url", url ?? "");
+    return json({ ok: true, imported });
   }
 
   /** Objects reachable from `want`, not walking past commits the client already has. */
@@ -98,26 +221,61 @@ export class Board extends DurableObject {
     return out;
   }
 
-  async updateRef({ name, old = null, new: next = null, objects = {}, by = "someone" }) {
-    if (typeof name !== "string" || name.length > 100 || !BRANCH.test(name)) {
-      return json({ error: `'${name}' is not a valid branch name` }, 400);
+  /** True if the commit and everything it references is stored. */
+  complete(hash) {
+    const seen = new Set();
+    const stack = [hash];
+    while (stack.length) {
+      const h = stack.pop();
+      if (seen.has(h)) continue;
+      seen.add(h);
+      const data = this.object(h);
+      if (!data) return false;
+      const o = JSON.parse(data);
+      if (o.type === "commit") stack.push(o.tree, ...o.parents);
+      else if (o.type === "tree") stack.push(...o.entries.map((e) => e.blob));
     }
+    return true;
+  }
+
+  async updateRef({ name, old = null, new: next = null, objects = {}, by = "someone" }) {
+    if (!validBranch(name)) return json({ error: `'${name}' is not a valid branch name` }, 400);
     for (const [hash, data] of Object.entries(objects)) {
-      if (typeof data !== "string" || (await sha256(data)) !== hash) {
+      if (typeof data !== "string" || (await sha256(data)) !== hash || !validObject(data)) {
         return json({ error: `Object ${hash.slice(0, 7)} failed verification` }, 400);
       }
     }
-
-    // No awaits from here on: the check-and-set below can't interleave with another request.
     for (const [hash, data] of Object.entries(objects)) {
       this.sql.exec("INSERT OR IGNORE INTO objects (hash, data) VALUES (?, ?)", hash, data);
     }
+
+    // Ref updates wait for GitHub, so they're queued: the compare-and-swap
+    // and the GitHub write happen as one step per board.
+    const run = this.refQueue.then(() => this.applyRef(name, old, next, by));
+    this.refQueue = run.catch(() => {});
+    return run;
+  }
+
+  async applyRef(name, old, next, by) {
     const current = this.refs()[name] ?? null;
     if (current !== old) return json({ error: "The branch moved on the server", current }, 409);
-
     if (next) {
       const data = this.object(next);
-      if (!data || JSON.parse(data).type !== "commit") return json({ error: "Unknown commit" }, 400);
+      if (!data || JSON.parse(data).type !== "commit" || !this.complete(next)) {
+        return json({ error: "Unknown or incomplete commit" }, 400);
+      }
+    } else if (name === "main") {
+      return json({ error: "main can't be deleted" }, 400);
+    }
+
+    try {
+      await this.gitStore()?.writeBranch(name, old, next);
+    } catch (e) {
+      console.error("GitHub write failed", e);
+      return json({ error: e.message, github: true }, e.status === 409 ? 409 : 502);
+    }
+
+    if (next) {
       this.sql.exec("INSERT INTO refs (name, hash) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET hash = excluded.hash", name, next);
     } else {
       this.sql.exec("DELETE FROM refs WHERE name = ?", name);

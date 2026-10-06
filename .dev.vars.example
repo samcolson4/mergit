@@ -1,0 +1,16 @@
+# Copy to .dev.vars for `npm run dev`. Never commit .dev.vars.
+#
+# A fine-grained personal access token with "Contents: Read and write" on the
+# repositories boards will be stored in. Leave unset to keep boards in
+# Durable Objects only.
+GITHUB_TOKEN=github_pat_...
+
+# Defaults offered when creating a board (each board can choose its own).
+GITHUB_DEFAULT_REPO=your-name/diagrams
+# Empty = the repository's default branch.
+GITHUB_DEFAULT_BRANCH=
+GITHUB_DEFAULT_DIR=diagrams
+
+# Only for testing against scripts/fake-github.mjs:
+# GITHUB_API_URL=http://127.0.0.1:8788
+# GITHUB_WEB_URL=http://127.0.0.1:8788/web

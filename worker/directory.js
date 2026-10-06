@@ -21,18 +21,20 @@ export class Directory extends DurableObject {
       return json({ boards: this.sql.exec("SELECT id, name, created FROM boards ORDER BY created DESC").toArray() });
     }
     if (request.method === "POST") {
-      const { name } = await request.json().catch(() => ({}));
+      const { name, github } = await request.json().catch(() => ({}));
       const clean = typeof name === "string" ? name.trim().slice(0, 80) : "";
       if (!clean) return json({ error: "A board name is required" }, 400);
       const id = newId();
       const board = this.env.BOARD.get(this.env.BOARD.idFromName(id));
+      const url = `${new URL(request.url).origin}/b/${id}`;
       const res = await board.fetch(`https://board/api/boards/${id}/init`, {
         method: "POST",
-        body: JSON.stringify({ name: clean }),
+        body: JSON.stringify({ name: clean, url, github: github ?? null }),
       });
-      if (!res.ok) return json({ error: "Could not create board" }, 500);
+      const result = await res.json();
+      if (!res.ok) return json({ error: result.error ?? "Could not create board" }, res.status);
       this.sql.exec("INSERT INTO boards (id, name, created) VALUES (?, ?, ?)", id, clean, Date.now());
-      return json({ id, name: clean });
+      return json({ id, name: clean, imported: result.imported ?? 0 });
     }
     return json({ error: "Method not allowed" }, 405);
   }
