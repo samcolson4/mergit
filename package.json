@@ -8,7 +8,10 @@
     "build": "npm run build:wasm && npm run build:web",
     "dev": "npm run build && wrangler dev",
     "deploy": "npm run build && wrangler deploy",
-    "test": "scripts/cargo.sh test --manifest-path core/Cargo.toml"
+    "test": "npm run test:core && npm run build:wasm && npm run test:js",
+    "dev:fake-github": "./scripts/dev-fake-github.sh",
+    "test:core": "scripts/cargo.sh test --manifest-path core/Cargo.toml",
+    "test:js": "node --test test/*.test.mjs"
   },
   "author": "",
   "license": "ISC",
