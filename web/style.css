@@ -315,3 +315,8 @@ h3 { margin: 6px 0 2px; font-size: 11px; text-transform: uppercase; letter-spaci
 .commit .gh:hover { color: var(--accent); }
 
 a.btn { text-decoration: none; color: inherit; }
+.notice { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--accent-soft); }
+.notice[hidden] { display: none; }
+.row .grow { flex: 1; }
+.dialog a { color: var(--accent); }
+.you .github-button { padding: 0; color: var(--accent); }

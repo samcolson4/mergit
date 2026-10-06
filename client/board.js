@@ -13,6 +13,7 @@ import {
   updateFrame,
 } from "./doc.js";
 import { Session } from "./sync.js";
+import { githubButton, openGithubSettings } from "./settings.js";
 import { TEMPLATES } from "./templates.js";
 import { api, el, identity, prefs, short } from "./util.js";
 
@@ -77,7 +78,11 @@ async function attempt(fn) {
     return await fn();
   } catch (e) {
     console.error(e);
-    toast(e.message, true);
+    if (e.data?.needsToken) {
+      if (await openGithubSettings(e.message)) toast("GitHub connected. Try that again.");
+    } else {
+      toast(e.message, true);
+    }
   }
 }
 
@@ -1026,6 +1031,7 @@ try {
   document.title = `${info.name} · mergit`;
   $("board-name").textContent = info.name;
   state.github = info.github;
+  $("github-link").after(githubButton());
   if (info.github) {
     Object.assign($("github-link"), { hidden: false, href: info.github.url, title: `History is stored in ${info.github.repo}/${info.github.path}` });
   }

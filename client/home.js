@@ -1,10 +1,12 @@
 import { loadCore } from "./core.js";
+import { github as githubAuth, githubButton, openGithubSettings } from "./settings.js";
 import { STARTER, seedRepo } from "./templates.js";
 import { api, el, identity, pushAllBranches, rename } from "./util.js";
 
 const $ = (id) => document.getElementById(id);
 let me = identity();
 $("me").textContent = me.name;
+$("rename").after(" · ", githubButton());
 
 let toastTimer;
 function toast(msg, isError = false) {
@@ -86,6 +88,9 @@ $("create-form").addEventListener("submit", async (e) => {
     storage() === "github"
       ? { repo: $("gh-repo").value.trim(), path: $("gh-path").value.trim(), branch: $("gh-branch").value.trim() }
       : null;
+  if (github && !githubAuth.token() && !config.github?.serverToken) {
+    if (!(await openGithubSettings("Boards stored on GitHub are written with your own token. Add it to continue."))) return;
+  }
   submit.disabled = true;
   submit.textContent = github ? "Connecting to GitHub…" : "Creating…";
   $("create-error").hidden = true;

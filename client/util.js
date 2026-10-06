@@ -49,10 +49,23 @@ export const prefs = {
   set: (key, value) => write(`mergit.${key}`, JSON.stringify(value)),
 };
 
-export async function api(path, { method = "GET", body } = {}) {
+/** The signed-in person's GitHub token, if they've added one (see settings.js). */
+function storedGithubToken() {
+  try {
+    return JSON.parse(read("mergit.github"))?.token ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function api(path, { method = "GET", body, token = storedGithubToken() } = {}) {
   const res = await fetch(path, {
     method,
-    headers: body ? { "content-type": "application/json" } : {},
+    headers: {
+      ...(body ? { "content-type": "application/json" } : {}),
+      // Only our own API ever sees it; the server uses it for this request's GitHub writes.
+      ...(token ? { "x-github-token": token } : {}),
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
