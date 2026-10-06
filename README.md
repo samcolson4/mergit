@@ -210,8 +210,9 @@ acme/platform @ main
 
 - **Every mergit commit is one git commit** that replaces just that folder, written
   through the GitHub Git Data API (about 4–6 API calls; commits take a second or two).
-  The git author is the mergit user (`noreply@mergit.invalid`); the committer is the
-  token's account. Trailers in the message carry what git can't hold:
+  It's made **with the committing person's own token**, so on GitHub it's committed by
+  them, and the author is their mergit name with their GitHub noreply address
+  (linked to their profile). Trailers in the message carry what git can't hold:
 
   ```
   Add express pay path
@@ -240,6 +241,25 @@ acme/platform @ main
   (it changes on every keystroke, which suits a CRDT log, not git), plus a cache of
   objects and refs, and the mergit-to-git commit mapping.
 
+### Connecting GitHub (per person)
+
+Each person adds **their own** GitHub token in the app: **Connect GitHub** in the top
+bar, or automatically the first time they commit to a GitHub-backed board.
+
+- It's checked against GitHub (`/api/github/user`), then kept **in that browser only**
+  (`localStorage`).
+- It's sent as an `x-github-token` header only with our own API's write requests
+  (commits, branches, creating or importing boards). The Worker uses it for that one
+  request and **never stores it**.
+- Viewing and live editing never need a token; only writing history does.
+- Access follows each person's own repository permissions.
+
+To create one: GitHub → Settings → Developer settings →
+[Fine-grained tokens](https://github.com/settings/personal-access-tokens/new). Choose the
+repositories boards live in, and grant **Contents: Read and write**. Organisations may
+need to approve fine-grained tokens. With `npm run dev:fake-github`, any token works
+and becomes your fake username.
+
 Use one board per folder. Two boards writing to the same folder will refuse each other's
 commits as "outside edits".
 
@@ -257,21 +277,17 @@ The first deploy creates the `mergit` Worker, applies the Durable Object migrati
 (`v1`, SQLite-backed `Board` and `Directory`), uploads `web/` as static assets, and
 prints a `*.workers.dev` URL.
 
-**Connect GitHub** (optional; without it, boards live only in Durable Objects):
+**GitHub needs no server setup.** People add their own tokens in the UI (see
+[Connecting GitHub](#connecting-github-per-person)). Optionally:
 
-1. Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new)
-   with access to the repositories boards will use, and the permission
-   **Contents: Read and write** (Metadata: read is added automatically). For an
-   organisation's repos, the org may need to approve the token.
-2. `npx wrangler secret put GITHUB_TOKEN` and paste it.
-3. Optionally set defaults offered when creating boards, in `wrangler.jsonc` →
-   `vars`: `GITHUB_DEFAULT_REPO` (`owner/repo`), `GITHUB_DEFAULT_BRANCH` (empty =
-   the repo's default branch), `GITHUB_DEFAULT_DIR` (default `diagrams`).
-4. The repository must have at least one commit. GitHub's Git Data API doesn't work on
-   empty repos.
+- Set defaults offered when creating boards, in `wrangler.jsonc` → `vars`:
+  `GITHUB_DEFAULT_REPO` (`owner/repo`), `GITHUB_DEFAULT_BRANCH` (empty = the repo's
+  default branch), `GITHUB_DEFAULT_DIR` (default `diagrams`).
+- Set a **fallback token** with `npx wrangler secret put GITHUB_TOKEN`. People without
+  their own token then commit through it (as that token's account).
 
-Every commit anyone makes goes through that one token. A GitHub App with short-lived,
-per-installation tokens is the long-term answer (see the production checklist).
+Repositories must have at least one commit: GitHub's Git Data API doesn't work on empty
+repos.
 
 **Then, before sharing it, add access control.** There's no built-in auth yet (see
 below). The quickest safe option is
@@ -350,10 +366,12 @@ roughly in priority order.
   rules on `/api/*`.
 - [x] ~~Deeper validation of pushes~~: object shapes and sizes are checked, and a ref
   can only point at a commit whose whole history is present.
-- [ ] **A GitHub App instead of one personal token.** Today every board's writes use a
-  single token from one account, with access to whatever that account can reach.
-  An App gives per-organisation installs, short-lived tokens, scoped repo access, and
-  a choice of repos at board creation.
+- [ ] **Protect tokens in the browser.** Personal tokens live in `localStorage`, so any
+  XSS would expose them. Ship a strict Content-Security-Policy first. Then move to
+  "Sign in with GitHub" (an OAuth or GitHub App user token, held server-side in an
+  encrypted, `HttpOnly` session), so the browser never holds a long-lived token.
+- [ ] **A GitHub App** for organisations: per-org installs, short-lived tokens, scoped
+  repository access, and a repo picker at board creation.
 - [ ] **One board per folder.** Refuse to create a second live board on a folder that's
   already connected (today they'd block each other's commits).
 - [ ] **GitHub failure modes.** Retry transient 5xx errors and secondary rate limits with
